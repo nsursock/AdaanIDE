@@ -1,4 +1,5 @@
-import type { AgentEvent, ModelInfo } from "../types.js";
+import type { AgentEvent, ModelInfo, ModelGroups } from "../types.js";
+import { settingsStore } from "./settings.svelte.js";
 
 export interface ChatMessageEntry {
   id: string;
@@ -26,6 +27,25 @@ class ChatStore {
 
   setModel(model: ModelInfo | null) {
     this.selectedModel = model;
+    settingsStore.setSelectedModelId(model?.id ?? null);
+  }
+
+  /**
+   * Restore the previously-selected model from persisted settings, given the
+   * freshly-loaded model list. Returns true if a match was found and applied.
+   * Called by the chat UI after `/api/models` resolves.
+   */
+  restoreModel(models: ModelGroups): boolean {
+    const id = settingsStore.settings.selectedModelId;
+    if (!id) return false;
+    const all = [...models.free, ...models.paid];
+    const found = all.find((m) => m.id === id);
+    if (found) {
+      // Set directly to avoid re-persisting the same id.
+      this.selectedModel = found;
+      return true;
+    }
+    return false;
   }
 
   setSessionId(id: string | null) {

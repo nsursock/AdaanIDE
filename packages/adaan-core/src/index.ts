@@ -31,5 +31,18 @@ export type {
 export { THEMES, DEFAULT_THEME, THEME_IDS, getTheme, themeCSSVars } from "./themes.js";
 
 // Stores (client-safe)
-export { themeStore, workspaceStore, chatStore } from "./stores/index.js";
-export type { OpenTab, ChatMessageEntry } from "./stores/index.js";
+export { themeStore, workspaceStore, chatStore, settingsStore } from "./stores/index.js";
+export type { OpenTab, ChatMessageEntry, Settings } from "./stores/index.js";
+export {
+  SCHEMA_VERSION,
+  STORAGE_KEY,
+  SIDEBAR_MIN,
+  SIDEBAR_MAX,
+  CHAT_MIN,
+  CHAT_MAX,
+  DEFAULT_SIDEBAR_W,
+  DEFAULT_CHAT_W,
+  DEFAULT_SETTINGS,
+  migrateBlob,
+  migrateLegacy,
+} from "./stores/index.js";

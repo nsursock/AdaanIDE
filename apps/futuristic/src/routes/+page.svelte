@@ -1,6 +1,12 @@
 <script lang="ts">
-  import { workspaceStore } from "@adaan/core";
-  import { onMount } from "svelte";
+  import {
+    workspaceStore,
+    settingsStore,
+    SIDEBAR_MIN,
+    SIDEBAR_MAX,
+    CHAT_MIN,
+    CHAT_MAX,
+  } from "@adaan/core";
   import { fly } from "svelte/transition";
   import { cubicInOut } from "svelte/easing";
   import { gsap } from "gsap";
@@ -10,6 +16,7 @@
   import Tabs from "$lib/components/Tabs.svelte";
   import ChatPanel from "$lib/components/ChatPanel.svelte";
   import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
+  import SettingsPanel from "$lib/components/SettingsPanel.svelte";
   import {
     IconCode,
     IconMessage,
@@ -19,32 +26,20 @@
     IconTerminal2,
     IconFolderCode,
     IconSparkles,
+    IconSettings,
   } from "@tabler/icons-svelte";
 
   let workspaceRoot = $state<string | null>(null);
   let showSidebar = $state(true);
   let showChat = $state(true);
   let threeEnabled = $state(true);
+  let showSettings = $state(false);
 
   // --- Resizable sidebars ---------------------------------------------------
-  // Widths are in px and persisted to localStorage so the user's layout sticks.
-  const SIDEBAR_MIN = 180;
-  const SIDEBAR_MAX = 520;
-  const CHAT_MIN = 280;
-  const CHAT_MAX = 640;
-  const DEFAULT_SIDEBAR_W = 288; // w-72
-  const DEFAULT_CHAT_W = 384;    // w-96
-
-  let sidebarWidth = $state(DEFAULT_SIDEBAR_W);
-  let chatWidth = $state(DEFAULT_CHAT_W);
-
-  // Load persisted widths
-  onMount(() => {
-    const sw = Number(localStorage.getItem("adaan.sidebarWidth"));
-    const cw = Number(localStorage.getItem("adaan.chatWidth"));
-    if (sw >= SIDEBAR_MIN && sw <= SIDEBAR_MAX) sidebarWidth = sw;
-    if (cw >= CHAT_MIN && cw <= CHAT_MAX) chatWidth = cw;
-  });
+  // Widths are seeded from the unified settings store and written back on
+  // drag-end. Local state holds the live value during a drag.
+  let sidebarWidth = $state(settingsStore.settings.sidebarWidth);
+  let chatWidth = $state(settingsStore.settings.chatWidth);
 
   // --- Drag handling --------------------------------------------------------
   type DragState = { which: "sidebar" | "chat"; startX: number; startW: number } | null;
@@ -72,8 +67,8 @@
 
   function endResize() {
     if (!drag) return;
-    if (drag.which === "sidebar") localStorage.setItem("adaan.sidebarWidth", String(sidebarWidth));
-    else localStorage.setItem("adaan.chatWidth", String(chatWidth));
+    if (drag.which === "sidebar") settingsStore.setSidebarWidth(sidebarWidth);
+    else settingsStore.setChatWidth(chatWidth);
     drag = null;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
@@ -200,6 +195,14 @@
       </a>
       <div class="w-px h-4 mx-0.5 bg-[var(--color-border)] opacity-60"></div>
       <ThemeSwitcher />
+      <button
+        class="icon-btn {showSettings ? 'active' : ''}"
+        onclick={() => showSettings = !showSettings}
+        title="Settings"
+        aria-label="Open settings"
+      >
+        <IconSettings size={16} />
+      </button>
     </div>
   </header>
 
@@ -253,3 +256,5 @@
     {/if}
   </div>
 {/if}
+
+<SettingsPanel bind:open={showSettings} />

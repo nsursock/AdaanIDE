@@ -39,8 +39,12 @@
       const res = await fetch("/api/models");
       if (res.ok) {
         models = await res.json();
-        const free = models?.free?.find((m) => m.toolsCapable);
-        if (free) chatStore.setModel(free);
+        // Restore the user's last-selected model if it's still available;
+        // otherwise fall back to the first free tools-capable model.
+        if (!chatStore.restoreModel(models)) {
+          const free = models?.free?.find((m) => m.toolsCapable);
+          if (free) chatStore.setModel(free);
+        }
       }
     } catch {
       // ignore

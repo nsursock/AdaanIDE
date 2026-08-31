@@ -1,20 +1,8 @@
 import type { ThemeId } from "../types.js";
-import { DEFAULT_THEME, THEME_IDS, getTheme, themeCSSVars } from "../themes.js";
-
-const STORAGE_KEY = "adaan-theme";
+import { THEME_IDS, getTheme, themeCSSVars } from "../themes.js";
+import { settingsStore } from "./settings.svelte.js";
 
 const isBrowser = typeof window !== "undefined";
-
-function loadTheme(): ThemeId {
-  if (!isBrowser) return DEFAULT_THEME;
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored && (THEME_IDS as string[]).includes(stored)) return stored as ThemeId;
-  } catch {
-    // localStorage not available
-  }
-  return DEFAULT_THEME;
-}
 
 function applyTheme(id: ThemeId) {
   if (!isBrowser) return;
@@ -25,18 +13,16 @@ function applyTheme(id: ThemeId) {
   for (const [key, value] of Object.entries(vars)) {
     html.style.setProperty(key, value);
   }
-  try {
-    localStorage.setItem(STORAGE_KEY, id);
-  } catch {
-    // ignore
-  }
 }
 
 class ThemeStore {
-  current = $state<ThemeId>(loadTheme());
+  /** Reactive view over the persisted settings — single source of truth. */
+  get current(): ThemeId {
+    return settingsStore.settings.theme;
+  }
 
   set(id: ThemeId) {
-    this.current = id;
+    settingsStore.setTheme(id);
     applyTheme(id);
   }
 
