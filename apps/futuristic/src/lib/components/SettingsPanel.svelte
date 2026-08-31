@@ -11,6 +11,7 @@
     CHAT_MAX,
     DEFAULT_SIDEBAR_W,
     DEFAULT_CHAT_W,
+    type ThemePalette,
   } from "@adaan/core";
   import { fly, fade } from "svelte/transition";
   import { cubicInOut } from "svelte/easing";
@@ -26,14 +27,39 @@
     IconKey,
     IconEye,
     IconEyeOff,
+    IconAdjustments,
+    IconCopy,
   } from "@tabler/icons-svelte";
 
   let { open = $bindable(false) } = $props();
+
+  type TabId = "general" | "themes";
+  let activeTab = $state<TabId>("general");
 
   let apiKeyInput = $state("");
   let showKey = $state(false);
   let keySaved = $state(false);
   let keyError = $state<string | null>(null);
+  let copiedHex = $state<string | null>(null);
+
+  const BASE_LABELS: { key: keyof ThemePalette["base"]; label: string }[] = [
+    { key: "bg", label: "Background" },
+    { key: "surface", label: "Surface" },
+    { key: "accent", label: "Accent" },
+    { key: "text", label: "Text" },
+    { key: "muted", label: "Muted" },
+  ];
+
+  const SYNTAX_LABELS: { key: keyof ThemePalette["syntax"]; label: string }[] = [
+    { key: "keyword", label: "Keyword" },
+    { key: "string", label: "String" },
+    { key: "comment", label: "Comment" },
+    { key: "number", label: "Number" },
+    { key: "variable", label: "Variable" },
+    { key: "function", label: "Function" },
+    { key: "type", label: "Type" },
+    { key: "operator", label: "Operator" },
+  ];
 
   // Seed the input from persisted settings when the panel opens.
   $effect(() => {
@@ -50,6 +76,16 @@
 
   function selectTheme(id: typeof THEME_IDS[number]) {
     themeStore.set(id);
+  }
+
+  async function copyHex(hex: string) {
+    try {
+      await navigator.clipboard.writeText(hex);
+      copiedHex = hex;
+      setTimeout(() => (copiedHex = null), 1200);
+    } catch {
+      // clipboard unavailable — ignore
+    }
   }
 
   function resetLayout() {
@@ -132,12 +168,34 @@
       </button>
     </header>
 
+    <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+      <button
+        class="settings-tab {activeTab === 'general' ? 'active' : ''}"
+        role="tab"
+        aria-selected={activeTab === "general"}
+        onclick={() => (activeTab = "general")}
+      >
+        <IconAdjustments size={13} />
+        <span>General</span>
+      </button>
+      <button
+        class="settings-tab {activeTab === 'themes' ? 'active' : ''}"
+        role="tab"
+        aria-selected={activeTab === "themes"}
+        onclick={() => (activeTab = "themes")}
+      >
+        <IconPalette size={13} />
+        <span>Themes</span>
+      </button>
+    </div>
+
     <div class="settings-body">
-      <!-- Appearance -->
+      {#if activeTab === "themes"}
+      <!-- Theme picker -->
       <section class="settings-section">
         <div class="settings-section-title">
           <IconPalette size={14} class="text-[var(--color-accent)]" />
-          <span>Appearance</span>
+          <span>Theme</span>
         </div>
         <div class="settings-theme-grid">
           {#each THEME_IDS as id (id)}
@@ -160,6 +218,49 @@
         </div>
       </section>
 
+      <!-- Palette detail for the active theme -->
+      {@const active = THEMES[settingsStore.settings.theme]}
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <span>{active.name} — UI colors</span>
+        </div>
+        <div class="swatch-list">
+          {#each BASE_LABELS as { key, label } (key)}
+            {@const hex = active.base[key]}
+            <button class="swatch-row" onclick={() => copyHex(hex)} title="Copy {hex}">
+              <span class="swatch-chip" style="background: {hex};"></span>
+              <span class="swatch-label">{label}</span>
+              <span class="swatch-hex">
+                {#if copiedHex === hex}<IconCheck size={11} class="text-[var(--color-success)]" />{:else}<IconCopy size={11} />{/if}
+                {hex}
+              </span>
+            </button>
+          {/each}
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <span>{active.name} — Syntax colors</span>
+        </div>
+        <div class="swatch-list">
+          {#each SYNTAX_LABELS as { key, label } (key)}
+            {@const hex = active.syntax[key]}
+            <button class="swatch-row" onclick={() => copyHex(hex)} title="Copy {hex}">
+              <span class="swatch-chip" style="background: {hex};"></span>
+              <span class="swatch-label">{label}</span>
+              <span class="swatch-hex">
+                {#if copiedHex === hex}<IconCheck size={11} class="text-[var(--color-success)]" />{:else}<IconCopy size={11} />{/if}
+                {hex}
+              </span>
+            </button>
+          {/each}
+        </div>
+        <div class="text-[0.625rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-2">
+          Click a color to copy its hex code.
+        </div>
+      </section>
+      {:else}
       <!-- Layout -->
       <section class="settings-section">
         <div class="settings-section-title">
@@ -286,6 +387,7 @@
           </button>
         </label>
       </section>
+      {/if}
     </div>
 
     <footer class="settings-footer">
@@ -332,6 +434,77 @@
     padding: 0.7rem 0.9rem;
     border-bottom: 1px solid var(--color-border);
     background: rgba(var(--accent-rgb), 0.06);
+  }
+
+  .settings-tabs {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.45rem 0.9rem 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .settings-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--color-muted);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 0.4rem 0.6rem;
+    margin-bottom: -1px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .settings-tab:hover { color: var(--color-text); }
+  .settings-tab.active {
+    color: var(--color-accent);
+    border-bottom-color: var(--color-accent);
+  }
+
+  .swatch-list {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.15rem 0.75rem;
+  }
+  .swatch-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0.35rem;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .swatch-row:hover {
+    background: rgba(var(--accent-rgb), 0.08);
+    border-color: rgba(var(--accent-rgb), 0.25);
+  }
+  .swatch-chip {
+    width: 0.9rem;
+    height: 0.9rem;
+    border-radius: 4px;
+    border: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+  .swatch-label {
+    font-size: 0.6875rem;
+    color: var(--color-text);
+    flex: 1;
+    min-width: 0;
+  }
+  .swatch-hex {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.625rem;
+    color: var(--color-muted);
   }
 
   .settings-body {
