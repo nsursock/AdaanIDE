@@ -23,9 +23,26 @@
     IconCpu,
     IconBackground,
     IconRestore,
+    IconKey,
+    IconEye,
+    IconEyeOff,
   } from "@tabler/icons-svelte";
 
   let { open = $bindable(false) } = $props();
+
+  let apiKeyInput = $state("");
+  let showKey = $state(false);
+  let keySaved = $state(false);
+  let keyError = $state<string | null>(null);
+
+  // Seed the input from persisted settings when the panel opens.
+  $effect(() => {
+    if (open) {
+      apiKeyInput = settingsStore.settings.openrouterApiKey ?? "";
+      keySaved = false;
+      keyError = null;
+    }
+  });
 
   function close() {
     open = false;
@@ -44,8 +61,48 @@
     chatStore.setModel(null);
   }
 
+  async function saveApiKey() {
+    keyError = null;
+    const trimmed = apiKeyInput.trim();
+    try {
+      const res = await fetch("/api/settings/api-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: trimmed }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        keyError = data.error ?? "Failed to save API key";
+        return;
+      }
+      settingsStore.setOpenrouterApiKey(trimmed || null);
+      keySaved = true;
+      setTimeout(() => (keySaved = false), 2000);
+    } catch (e) {
+      keyError = e instanceof Error ? e.message : "Network error";
+    }
+  }
+
+  async function clearApiKey() {
+    apiKeyInput = "";
+    showKey = false;
+    keyError = null;
+    try {
+      await fetch("/api/settings/api-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: "" }),
+      });
+    } catch {
+      // best-effort
+    }
+    settingsStore.setOpenrouterApiKey(null);
+  }
+
   function resetAll() {
     settingsStore.reset();
+    apiKeyInput = "";
+    showKey = false;
     // Re-apply the default theme to the DOM immediately.
     themeStore.init();
   }
@@ -163,6 +220,47 @@
         </div>
         <div class="text-[0.625rem] text-[var(--color-muted)] opacity-70 leading-relaxed">
           The chosen model is remembered across reloads. If it becomes unavailable, the agent falls back to the first free tools-capable model.
+        </div>
+      </section>
+
+      <!-- API Key -->
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <IconKey size={14} class="text-[var(--color-accent)]" />
+          <span>OpenRouter API Key</span>
+        </div>
+        <div class="settings-key-row">
+          <input
+            type={showKey ? "text" : "password"}
+            class="settings-key-input"
+            placeholder="sk-or-v1-…"
+            value={apiKeyInput}
+            oninput={(e) => { apiKeyInput = e.currentTarget.value; keySaved = false; keyError = null; }}
+            spellcheck="false"
+            autocomplete="off"
+          />
+          <button
+            class="icon-btn settings-key-toggle"
+            onclick={() => showKey = !showKey}
+            title={showKey ? "Hide key" : "Show key"}
+            aria-label={showKey ? "Hide API key" : "Show API key"}
+          >
+            {#if showKey}<IconEyeOff size={14} />{:else}<IconEye size={14} />{/if}
+          </button>
+        </div>
+        <div class="flex items-center gap-2 mt-2">
+          <button class="settings-link-btn" onclick={saveApiKey} disabled={!apiKeyInput.trim()}>
+            {#if keySaved}<IconCheck size={12} /> Saved{:else}Save key{/if}
+          </button>
+          {#if settingsStore.settings.openrouterApiKey || apiKeyInput}
+            <button class="settings-link-btn" onclick={clearApiKey}>Clear</button>
+          {/if}
+          {#if keyError}
+            <span class="text-[0.6875rem] text-[var(--color-error)]">{keyError}</span>
+          {/if}
+        </div>
+        <div class="text-[0.625rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-2">
+          Stored locally in your browser and sent to the server on save. Falls back to the <code class="font-mono">OPENROUTER_API_KEY</code> env var when empty. Get a key at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener" class="text-[var(--color-accent)] underline">openrouter.ai/keys</a>.
         </div>
       </section>
 
@@ -358,6 +456,37 @@
     transition: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
   }
   .toggle.on .toggle-knob { transform: translateX(16px); }
+
+  .settings-key-row {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+  }
+  .settings-key-input {
+    flex: 1;
+    min-width: 0;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.75rem;
+    font-family: var(--font-mono, monospace);
+    color: var(--color-text);
+    background: rgba(var(--bg-deep-rgb), 0.5);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .settings-key-input:focus {
+    border-color: var(--color-accent);
+    box-shadow: var(--glow-accent);
+  }
+  .settings-key-toggle {
+    flex-shrink: 0;
+    width: 2rem;
+    height: 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
 
   .settings-footer {
     display: flex;

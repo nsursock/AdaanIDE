@@ -27,6 +27,7 @@ export { TOOL_SCHEMAS, TOOL_NAMES } from "./agent/tools/schema.js";
 export { listSymbols, extractSymbolContent } from "./agent/tools/symbols.js";
 export {
   initProvider,
+  updateProviderKey,
   getProvider,
   getEngine,
   getWorkspace,

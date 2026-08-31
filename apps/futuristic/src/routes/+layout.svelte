@@ -15,6 +15,16 @@
   onMount(() => {
     themeStore.init();
     settingsStore.init();
+    // If a UI-entered API key was persisted, push it to the server so it
+    // overrides the env var for this session.
+    const storedKey = settingsStore.settings.openrouterApiKey;
+    if (storedKey) {
+      fetch("/api/settings/api-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: storedKey }),
+      }).catch(() => {});
+    }
     // Animate layout in
     gsap.from(".app-container", { opacity: 0, duration: 0.6, ease: "power2.out" });
   });

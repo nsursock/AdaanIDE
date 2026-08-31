@@ -91,6 +91,10 @@ class SettingsStore {
     this.update({ threeEnabled: b });
   }
 
+  setOpenrouterApiKey(key: string | null) {
+    this.update({ openrouterApiKey: key });
+  }
+
   reset() {
     this.settings = { ...DEFAULT_SETTINGS };
     this.persist();

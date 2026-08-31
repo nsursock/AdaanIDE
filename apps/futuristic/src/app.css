@@ -132,6 +132,52 @@
   --backdrop-rgb: 10, 0, 30;
 }
 
+:root[data-theme="dawn"] {
+  --color-bg: #e9eef6;
+  --color-surface: rgba(247, 243, 251, 0.75);
+  --color-surface-solid: #f7f3fb;
+  --color-surface-hover: rgba(237, 230, 244, 0.85);
+  --color-surface-glass: linear-gradient(160deg, rgba(247, 243, 251, 0.85), rgba(232, 238, 246, 0.9));
+  /* Dawn: coral rising sun + dawn blue + golden light on a cool pale sky.
+     Distinct from Ghibli's earthy forest: cooler lavender-blue bg, warm coral
+     accent, and a soft peach→blue→violet horizon gradient. */
+  --color-accent: #ff7e6b;
+  --color-accent-secondary: #6b8fd6;
+  --color-accent-cyan: #d4a017;
+  --color-accent-glow: rgba(var(--accent-rgb), 0.28);
+  --color-cyan-glow: rgba(var(--accent-3-rgb), 0.28);
+  --color-purple-glow: rgba(var(--accent-2-rgb), 0.28);
+  --color-text: #2f3340;
+  --color-muted: #a59ac4;
+  --color-success: #5a8f7b;
+  --color-warning: #d4a017;
+  --color-error: #c0392b;
+  --color-border: rgba(var(--muted-rgb), 0.4);
+  --color-border-accent: rgba(var(--accent-rgb), 0.4);
+  --color-selection: rgba(var(--accent-rgb), 0.22);
+  /* Soft first-light glows — gentle, like morning mist catching the sun */
+  --glow-accent: 0 0 18px rgba(var(--accent-rgb), 0.22);
+  --glow-text: 0 0 8px rgba(var(--accent-rgb), 0.16);
+  /* Dawn horizon: peach coral → dawn blue → soft violet */
+  --gradient-spectrum: linear-gradient(90deg, #ff7e6b 0%, #d4a017 25%, #6b8fd6 50%, #8b6fb5 75%, #ff7e6b 100%);
+
+  /* RGB channels for rgba() tints */
+  --accent-rgb: 255, 126, 107;
+  --accent-2-rgb: 107, 143, 214;
+  --accent-3-rgb: 212, 160, 23;
+  --muted-rgb: 165, 154, 196;
+  --error-rgb: 192, 57, 43;
+  --success-rgb: 90, 143, 123;
+  --warning-rgb: 212, 160, 23;
+  /* Semantic surface layers (rgb) — cool pale dawn sky */
+  --surface-1-rgb: 247, 243, 251;
+  --surface-2-rgb: 232, 238, 246;
+  --bg-deep-rgb: 233, 238, 246;
+  --active-text: #2f3340;
+  --shadow-rgb: 90, 80, 110;
+  --backdrop-rgb: 70, 60, 90;
+}
+
 /* Global Font: JetBrains Mono everywhere */
 *, *::before, *::after {
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;

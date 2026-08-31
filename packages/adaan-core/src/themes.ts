@@ -64,11 +64,32 @@ export const THEMES: Record<ThemeId, ThemePalette> = {
       operator: "#8338ec",
     },
   },
+  dawn: {
+    id: "dawn",
+    name: "Dawn",
+    base: {
+      bg: "#e9eef6",
+      surface: "#f7f3fb",
+      accent: "#ff7e6b",
+      text: "#2f3340",
+      muted: "#a59ac4",
+    },
+    syntax: {
+      keyword: "#ff7e6b",
+      string: "#5a8f7b",
+      comment: "#a59ac4",
+      number: "#d4a017",
+      variable: "#2f3340",
+      function: "#6b8fd6",
+      type: "#8b6fb5",
+      operator: "#7a8aa8",
+    },
+  },
 };
 
 export const DEFAULT_THEME: ThemeId = "retrowave";
 
-export const THEME_IDS: ThemeId[] = ["retrowave", "ghibli", "fiesta"];
+export const THEME_IDS: ThemeId[] = ["retrowave", "ghibli", "fiesta", "dawn"];
 
 export function getTheme(id: ThemeId): ThemePalette {
   return THEMES[id] ?? THEMES[DEFAULT_THEME];

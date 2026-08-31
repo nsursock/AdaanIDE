@@ -21,6 +21,20 @@ export function initProvider(apiKey: string) {
   engine = new AgentEngine({ provider, registry: defaultRegistry });
 }
 
+/**
+ * Swap the API key on the live provider at runtime. Called when a user
+ * enters a key via the settings UI — the env var remains the initial
+ * default, but a UI-provided key takes precedence.
+ */
+export function updateProviderKey(apiKey: string) {
+  if (!provider) {
+    initProvider(apiKey);
+    return;
+  }
+  provider = new OpenRouterProvider({ apiKey: apiKey || "" });
+  engine = new AgentEngine({ provider, registry: defaultRegistry });
+}
+
 export function getProvider(): OpenRouterProvider {
   if (!provider) throw new Error("Provider not initialized. Call initProvider() first.");
   if (!provider["apiKey"]) {

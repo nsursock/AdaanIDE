@@ -31,6 +31,12 @@ export interface Settings {
   /** Persisted model id; resolved to a full ModelInfo by the chat UI at load. */
   selectedModelId: string | null;
   threeEnabled: boolean;
+  /**
+   * OpenRouter API key entered via the UI. When null, the server falls back
+   * to the OPENROUTER_API_KEY env var. Stored in localStorage in plaintext —
+   * acceptable for a local-first IDE but not for a hosted multi-user app.
+   */
+  openrouterApiKey: string | null;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -40,6 +46,7 @@ export const DEFAULT_SETTINGS: Settings = {
   chatWidth: DEFAULT_CHAT_W,
   selectedModelId: null,
   threeEnabled: true,
+  openrouterApiKey: null,
 };
 
 function clamp(n: number, min: number, max: number): number {
@@ -81,6 +88,12 @@ export function migrateBlob(raw: unknown): Settings {
           : DEFAULT_SETTINGS.selectedModelId,
     threeEnabled:
       typeof obj.threeEnabled === "boolean" ? obj.threeEnabled : DEFAULT_SETTINGS.threeEnabled,
+    openrouterApiKey:
+      typeof obj.openrouterApiKey === "string"
+        ? obj.openrouterApiKey
+        : obj.openrouterApiKey === null
+          ? null
+          : DEFAULT_SETTINGS.openrouterApiKey,
   };
 }
 

@@ -4,7 +4,7 @@
 
 // --- Themes -----------------------------------------------------------------
 
-export type ThemeId = "retrowave" | "ghibli" | "fiesta";
+export type ThemeId = "retrowave" | "ghibli" | "fiesta" | "dawn";
 
 export interface ThemePalette {
   id: ThemeId;

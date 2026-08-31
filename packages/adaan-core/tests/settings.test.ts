@@ -59,6 +59,13 @@ test("migrateBlob: selectedModelId accepts string or null, else default", () => 
   assert.equal(migrateBlob({ selectedModelId: 42 }).selectedModelId, DEFAULT_SETTINGS.selectedModelId);
 });
 
+test("migrateBlob: openrouterApiKey accepts string or null, else default", () => {
+  assert.equal(migrateBlob({ openrouterApiKey: "sk-or-v1-abc" }).openrouterApiKey, "sk-or-v1-abc");
+  assert.equal(migrateBlob({ openrouterApiKey: null }).openrouterApiKey, null);
+  assert.equal(migrateBlob({ openrouterApiKey: 123 }).openrouterApiKey, DEFAULT_SETTINGS.openrouterApiKey);
+  assert.equal(migrateBlob({}).openrouterApiKey, null);
+});
+
 test("migrateLegacy: folds legacy per-feature keys into a partial", () => {
   const store: Record<string, string> = {
     "adaan-theme": "fiesta",

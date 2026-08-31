@@ -14,7 +14,7 @@ apps/futuristic/ # Futuristic UI (GSAP + Three.js, glassmorphism, port 5174)
 ```bash
 pnpm install                          # Install all deps
 pnpm dev                              # Dev futuristic app (port 5174)
-pnpm --filter @adaan/core test        # Run core tests (97 tests)
+pnpm --filter @adaan/core test        # Run core tests (98 tests)
 pnpm --filter @adaan/futuristic build # Build futuristic app
 pnpm --filter @adaan/futuristic dev   # Dev futuristic (port 5174)
 ```
