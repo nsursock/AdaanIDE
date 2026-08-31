@@ -188,7 +188,14 @@
           onclick={() => node.type === "dir" ? toggle(node.path) : open(node.path)}
           role="button"
           tabindex="0"
+          draggable={node.type === "file" && node.zone !== "protected"}
           onkeydown={(e) => e.key === "Enter" && (node.type === "dir" ? toggle(node.path) : open(node.path))}
+          ondragstart={(e) => {
+            if (node.type !== "file") return;
+            e.dataTransfer?.setData("application/x-adaan-path", node.path);
+            e.dataTransfer?.setData("text/plain", node.path);
+            if (e.dataTransfer) e.dataTransfer.effectAllowed = "copy";
+          }}
         >
           {#if node.type === "dir"}
             <span class="opacity-60 flex-shrink-0 mr-0.5">

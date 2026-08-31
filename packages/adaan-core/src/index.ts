@@ -40,9 +40,13 @@ export {
   SIDEBAR_MAX,
   CHAT_MIN,
   CHAT_MAX,
+  TERMINAL_MIN,
+  TERMINAL_MAX,
   DEFAULT_SIDEBAR_W,
   DEFAULT_CHAT_W,
+  DEFAULT_TERMINAL_H,
   DEFAULT_SETTINGS,
+  type TerminalMode,
   migrateBlob,
   migrateLegacy,
 } from "./stores/index.js";

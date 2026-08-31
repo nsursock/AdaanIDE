@@ -9,6 +9,8 @@ import {
   SIDEBAR_MAX,
   CHAT_MIN,
   CHAT_MAX,
+  TERMINAL_MIN,
+  TERMINAL_MAX,
 } from "../src/stores/settings.js";
 
 test("migrateBlob: empty / null input yields defaults", () => {
@@ -51,6 +53,24 @@ test("migrateBlob: out-of-range widths are clamped", () => {
 test("migrateBlob: NaN width falls back to min, non-number to default", () => {
   assert.equal(migrateBlob({ sidebarWidth: NaN }).sidebarWidth, SIDEBAR_MIN);
   assert.equal(migrateBlob({ sidebarWidth: "wide" }).sidebarWidth, DEFAULT_SETTINGS.sidebarWidth);
+});
+
+test("migrateBlob: terminalHeight is clamped, terminalEnabled coerced to bool", () => {
+  assert.equal(migrateBlob({ terminalHeight: 10 }).terminalHeight, TERMINAL_MIN);
+  assert.equal(migrateBlob({ terminalHeight: 9999 }).terminalHeight, TERMINAL_MAX);
+  assert.equal(migrateBlob({ terminalHeight: 250 }).terminalHeight, 250);
+  assert.equal(migrateBlob({ terminalHeight: "tall" }).terminalHeight, DEFAULT_SETTINGS.terminalHeight);
+  assert.equal(migrateBlob({ terminalEnabled: true }).terminalEnabled, true);
+  assert.equal(migrateBlob({}).terminalEnabled, DEFAULT_SETTINGS.terminalEnabled);
+  assert.equal(migrateBlob({ terminalEnabled: "yes" }).terminalEnabled, DEFAULT_SETTINGS.terminalEnabled);
+});
+
+test("migrateBlob: terminalMode accepts 'full'/'editor', else defaults to full", () => {
+  assert.equal(migrateBlob({ terminalMode: "editor" }).terminalMode, "editor");
+  assert.equal(migrateBlob({ terminalMode: "full" }).terminalMode, "full");
+  assert.equal(migrateBlob({}).terminalMode, "full");
+  assert.equal(migrateBlob({ terminalMode: "wide" }).terminalMode, "full");
+  assert.equal(migrateBlob({ terminalMode: 123 }).terminalMode, "full");
 });
 
 test("migrateBlob: selectedModelId accepts string or null, else default", () => {

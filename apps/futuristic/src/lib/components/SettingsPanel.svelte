@@ -9,8 +9,11 @@
     SIDEBAR_MAX,
     CHAT_MIN,
     CHAT_MAX,
+    TERMINAL_MIN,
+    TERMINAL_MAX,
     DEFAULT_SIDEBAR_W,
     DEFAULT_CHAT_W,
+    DEFAULT_TERMINAL_H,
     type ThemePalette,
   } from "@adaan/core";
   import { fly, fade } from "svelte/transition";
@@ -91,6 +94,7 @@
   function resetLayout() {
     settingsStore.setSidebarWidth(DEFAULT_SIDEBAR_W);
     settingsStore.setChatWidth(DEFAULT_CHAT_W);
+    settingsStore.setTerminalHeight(DEFAULT_TERMINAL_H);
   }
 
   function clearModel() {
@@ -294,6 +298,19 @@
             max={CHAT_MAX}
             value={settingsStore.settings.chatWidth}
             oninput={(e) => settingsStore.setChatWidth(Number(e.currentTarget.value))}
+          />
+        </label>
+        <label class="settings-field">
+          <div class="settings-field-label">
+            <span>Terminal pane height</span>
+            <span class="settings-value">{settingsStore.settings.terminalHeight}px</span>
+          </div>
+          <input
+            type="range"
+            min={TERMINAL_MIN}
+            max={TERMINAL_MAX}
+            value={settingsStore.settings.terminalHeight}
+            oninput={(e) => settingsStore.setTerminalHeight(Number(e.currentTarget.value))}
           />
         </label>
       </section>

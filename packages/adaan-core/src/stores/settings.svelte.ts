@@ -83,6 +83,18 @@ class SettingsStore {
     this.update({ chatWidth: n });
   }
 
+  setTerminalHeight(n: number) {
+    this.update({ terminalHeight: n });
+  }
+
+  setTerminalEnabled(b: boolean) {
+    this.update({ terminalEnabled: b });
+  }
+
+  setTerminalMode(mode: "full" | "editor") {
+    this.update({ terminalMode: mode });
+  }
+
   setSelectedModelId(id: string | null) {
     this.update({ selectedModelId: id });
   }

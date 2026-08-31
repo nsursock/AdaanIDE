@@ -798,6 +798,35 @@ html, body {
   background: rgba(var(--accent-rgb), 0.08);
 }
 
+/* Horizontal drag handle above the bottom terminal pane */
+.terminal-resizer {
+  flex-shrink: 0;
+  height: 4px;
+  margin: 0 -1px;
+  cursor: row-resize;
+  position: relative;
+  z-index: 20;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+.terminal-resizer::after {
+  content: "";
+  position: absolute;
+  inset: 1px 0;
+  border-radius: 1px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+.terminal-resizer:hover::after,
+.terminal-resizer:active::after {
+  background: var(--color-accent);
+  box-shadow: 0 0 8px var(--color-accent-glow);
+}
+.terminal-resizer:active {
+  background: rgba(var(--accent-rgb), 0.08);
+}
+
 .pane-bracketed::before {
   content: "";
   position: absolute;

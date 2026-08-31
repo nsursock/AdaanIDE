@@ -22,12 +22,26 @@ export const CHAT_MIN = 280;
 export const CHAT_MAX = 640;
 export const DEFAULT_SIDEBAR_W = 288; // w-72
 export const DEFAULT_CHAT_W = 384;    // w-96
+export const TERMINAL_MIN = 90;
+export const TERMINAL_MAX = 520;
+export const DEFAULT_TERMINAL_H = 220;
+
+/** Terminal pane width mode: "full" spans the whole window, "editor" is
+ *  contained between the sidebar and chat panes (under the editor only). */
+export type TerminalMode = "full" | "editor";
+export const TERMINAL_MODES: TerminalMode[] = ["full", "editor"];
 
 export interface Settings {
   schemaVersion: number;
   theme: ThemeId;
   sidebarWidth: number;
   chatWidth: number;
+  /** Height of the bottom terminal pane in px (when open). */
+  terminalHeight: number;
+  /** Whether the bottom terminal pane is shown. */
+  terminalEnabled: boolean;
+  /** Terminal width mode: "full" = whole window, "editor" = between sidebars. */
+  terminalMode: TerminalMode;
   /** Persisted model id; resolved to a full ModelInfo by the chat UI at load. */
   selectedModelId: string | null;
   threeEnabled: boolean;
@@ -44,6 +58,9 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: DEFAULT_THEME,
   sidebarWidth: DEFAULT_SIDEBAR_W,
   chatWidth: DEFAULT_CHAT_W,
+  terminalHeight: DEFAULT_TERMINAL_H,
+  terminalEnabled: false,
+  terminalMode: "full",
   selectedModelId: null,
   threeEnabled: true,
   openrouterApiKey: null,
@@ -58,6 +75,12 @@ function safeTheme(value: unknown): ThemeId {
   return typeof value === "string" && (THEME_IDS as string[]).includes(value)
     ? (value as ThemeId)
     : DEFAULT_THEME;
+}
+
+function safeTerminalMode(value: unknown): TerminalMode {
+  return typeof value === "string" && (TERMINAL_MODES as string[]).includes(value)
+    ? (value as TerminalMode)
+    : "full";
 }
 
 /**
@@ -80,6 +103,14 @@ export function migrateBlob(raw: unknown): Settings {
       CHAT_MIN,
       CHAT_MAX,
     ),
+    terminalHeight: clamp(
+      typeof obj.terminalHeight === "number" ? obj.terminalHeight : DEFAULT_SETTINGS.terminalHeight,
+      TERMINAL_MIN,
+      TERMINAL_MAX,
+    ),
+    terminalEnabled:
+      typeof obj.terminalEnabled === "boolean" ? obj.terminalEnabled : DEFAULT_SETTINGS.terminalEnabled,
+    terminalMode: safeTerminalMode(obj.terminalMode),
     selectedModelId:
       typeof obj.selectedModelId === "string"
         ? obj.selectedModelId

@@ -6,6 +6,8 @@
     SIDEBAR_MAX,
     CHAT_MIN,
     CHAT_MAX,
+    TERMINAL_MIN,
+    TERMINAL_MAX,
   } from "@adaan/core";
   import { fly } from "svelte/transition";
   import { cubicInOut } from "svelte/easing";
@@ -15,6 +17,7 @@
   import Editor from "$lib/components/Editor.svelte";
   import Tabs from "$lib/components/Tabs.svelte";
   import ChatPanel from "$lib/components/ChatPanel.svelte";
+  import TerminalPane from "$lib/components/TerminalPane.svelte";
   import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
   import {
@@ -34,15 +37,20 @@
   let showChat = $state(true);
   let threeEnabled = $state(true);
   let showSettings = $state(false);
+  let showTerminal = $state(settingsStore.settings.terminalEnabled);
 
   // --- Resizable sidebars ---------------------------------------------------
   // Widths are seeded from the unified settings store and written back on
   // drag-end. Local state holds the live value during a drag.
   let sidebarWidth = $state(settingsStore.settings.sidebarWidth);
   let chatWidth = $state(settingsStore.settings.chatWidth);
+  let terminalHeight = $state(settingsStore.settings.terminalHeight);
 
   // --- Drag handling --------------------------------------------------------
-  type DragState = { which: "sidebar" | "chat"; startX: number; startW: number } | null;
+  type DragState =
+    | { which: "sidebar" | "chat"; startX: number; startW: number }
+    | { which: "terminal"; startY: number; startH: number }
+    | null;
   let drag: DragState = $state(null);
 
   function startResize(which: "sidebar" | "chat", e: MouseEvent) {
@@ -53,8 +61,22 @@
     document.body.style.userSelect = "none";
   }
 
+  function startTerminalResize(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    drag = { which: "terminal", startY: e.clientY, startH: terminalHeight };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+  }
+
   function onMove(e: MouseEvent) {
     if (!drag) return;
+    if (drag.which === "terminal") {
+      // Terminal is at the bottom — dragging up increases height.
+      const delta = drag.startY - e.clientY;
+      terminalHeight = Math.min(TERMINAL_MAX, Math.max(TERMINAL_MIN, drag.startH + delta));
+      return;
+    }
     const delta = e.clientX - drag.startX;
     if (drag.which === "sidebar") {
       // Sidebar is on the left — dragging right increases width.
@@ -68,10 +90,16 @@
   function endResize() {
     if (!drag) return;
     if (drag.which === "sidebar") settingsStore.setSidebarWidth(sidebarWidth);
-    else settingsStore.setChatWidth(chatWidth);
+    else if (drag.which === "chat") settingsStore.setChatWidth(chatWidth);
+    else settingsStore.setTerminalHeight(terminalHeight);
     drag = null;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
+  }
+
+  function toggleTerminal() {
+    showTerminal = !showTerminal;
+    settingsStore.setTerminalEnabled(showTerminal);
   }
 
   // Attach global listeners while dragging
@@ -185,6 +213,14 @@
       >
         <IconMessage size={16} />
       </button>
+      <button
+        class="icon-btn {showTerminal ? 'active' : ''}"
+        onclick={toggleTerminal}
+        title="{showTerminal ? 'Hide' : 'Show'} Terminal"
+        aria-label="Toggle terminal"
+      >
+        <IconTerminal2 size={16} />
+      </button>
       <a
         href="http://localhost:5173"
         class="icon-btn"
@@ -229,10 +265,22 @@
       </div>
     {/if}
 
-    <main class="panel-enter pane pane-bracketed flex-1 flex flex-col overflow-hidden rounded-lg">
-      <Tabs on:close={(e) => workspaceStore.closeTab(e.detail)} />
-      <Editor on:save={(e) => saveFile(e.detail.path, e.detail.content, e.detail.hash)} />
-    </main>
+    <div class="editor-col flex-1 flex flex-col overflow-hidden gap-1 min-w-0">
+      <main class="panel-enter pane pane-bracketed flex-1 flex flex-col overflow-hidden rounded-lg">
+        <Tabs on:close={(e) => workspaceStore.closeTab(e.detail)} />
+        <Editor on:save={(e) => saveFile(e.detail.path, e.detail.content, e.detail.hash)} />
+      </main>
+      {#if showTerminal && settingsStore.settings.terminalMode === "editor"}
+        <div
+          class="terminal-resizer"
+          onmousedown={startTerminalResize}
+          role="separator"
+          aria-orientation="horizontal"
+          tabindex="-1"
+        ></div>
+        <TerminalPane {workspaceRoot} height={terminalHeight} />
+      {/if}
+    </div>
 
     {#if showChat}
       <div
@@ -255,6 +303,17 @@
       </div>
     {/if}
   </div>
+
+  {#if showTerminal && settingsStore.settings.terminalMode === "full"}
+    <div
+      class="terminal-resizer"
+      onmousedown={startTerminalResize}
+      role="separator"
+      aria-orientation="horizontal"
+      tabindex="-1"
+    ></div>
+    <TerminalPane {workspaceRoot} height={terminalHeight} />
+  {/if}
 {/if}
 
 <SettingsPanel bind:open={showSettings} />
