@@ -1,0 +1,16 @@
+{
+  "name": "adaan-ide",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @adaan/futuristic dev",
+    "build": "pnpm -r run build",
+    "check": "pnpm -r run check",
+    "test": "pnpm --filter @adaan/core test",
+    "build:core": "pnpm --filter @adaan/core build"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
