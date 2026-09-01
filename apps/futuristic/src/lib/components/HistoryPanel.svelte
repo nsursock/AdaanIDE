@@ -118,7 +118,7 @@
   }
 </script>
 
-{#if activePath && (entries.length > 0 || loading)}
+{#if activePath}
   <div class="history-panel">
     <div class="history-header" onclick={() => (expanded = !expanded)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); expanded = !expanded; } }}>
       {#if expanded}
@@ -128,7 +128,7 @@
       {/if}
       <IconHistory size={12} class="flex-shrink-0" style="color: var(--color-accent);" />
       <span class="history-title">
-        History
+        Timeline
         {#if entries.length > 0}
           <span class="history-count">{entries.length}</span>
         {/if}
@@ -136,8 +136,8 @@
       <button
         class="history-refresh"
         onclick={(e) => { e.stopPropagation(); loadHistory(); }}
-        title="Refresh history"
-        aria-label="Refresh history"
+        title="Refresh timeline"
+        aria-label="Refresh timeline"
       >
         <IconRefresh size={11} />
       </button>
@@ -198,9 +198,10 @@
 
 <style>
   .history-panel {
-    border-bottom: 1px solid rgba(var(--muted-rgb), 0.15);
+    border-top: 1px solid rgba(var(--muted-rgb), 0.15);
     background: rgba(var(--bg-deep-rgb), 0.3);
     z-index: 10;
+    flex-shrink: 0;
   }
 
   .history-header {

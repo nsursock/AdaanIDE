@@ -14,6 +14,7 @@
   import { gsap } from "gsap";
   import WorkspacePicker from "$lib/components/WorkspacePicker.svelte";
   import FileTree from "$lib/components/FileTree.svelte";
+  import HistoryPanel from "$lib/components/HistoryPanel.svelte";
   import Editor from "$lib/components/Editor.svelte";
   import Tabs from "$lib/components/Tabs.svelte";
   import ChatPanel from "$lib/components/ChatPanel.svelte";
@@ -254,6 +255,7 @@
           style="width: {sidebarWidth}px;"
         >
           <FileTree on:open={(e) => openFile(e.detail)} on:refresh={loadTree} />
+          <HistoryPanel {workspaceRoot} />
         </aside>
         <button
           type="button"

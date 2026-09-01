@@ -9,7 +9,6 @@
   import { syntaxHighlighting, HighlightStyle } from "@codemirror/language";
   import { tags } from "@lezer/highlight";
   import { themeStore } from "@adaan/core";
-  import HistoryPanel from "./HistoryPanel.svelte";
   import {
     IconCode,
     IconFileCode,
@@ -451,9 +450,6 @@
       </div>
     </div>
   {/if}
-
-  <!-- File version history (local GitHub-style timeline) -->
-  <HistoryPanel {workspaceRoot} />
 
   <!-- Editor Container -->
   <div class="flex-1 overflow-hidden relative" bind:this={editorDiv}>
