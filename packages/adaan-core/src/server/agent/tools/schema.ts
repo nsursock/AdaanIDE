@@ -67,12 +67,12 @@ export const TOOL_SCHEMAS: ProviderTool[] = [
     type: "function",
     function: {
       name: "apply_patch",
-      description: "Apply a SEARCH/REPLACE patch to a file. Requires expectedHash from a prior read_file. Format: blocks of 'SEARCH\\n<original lines>\\nREPLACE\\n<new lines>' separated by '---'.",
+      description: "Apply a SEARCH/REPLACE patch to a file. Requires expectedHash from a prior read_file. Format: blocks of 'SEARCH\\n<original lines>\\nREPLACE\\n<new lines>' separated by '---'. Every SEARCH block MUST have a REPLACE section — to delete lines, use 'REPLACE' with nothing after it.",
       parameters: {
         type: "object",
         properties: {
           path: { type: "string", description: "File path relative to workspace root." },
-          patch: { type: "string", description: "SEARCH/REPLACE patch blocks." },
+          patch: { type: "string", description: "SEARCH/REPLACE patch blocks. Each block must have both SEARCH and REPLACE sections." },
           expectedHash: { type: "string", description: "Hash from the last read_file of this file." },
         },
         required: ["path", "patch", "expectedHash"],
@@ -99,11 +99,12 @@ export const TOOL_SCHEMAS: ProviderTool[] = [
     type: "function",
     function: {
       name: "create_file",
-      description: "Create a new empty file. Fails if the file already exists.",
+      description: "Create a new file with the given content. Fails if the file already exists. Use this instead of write_file when creating new files — it does not require a hash.",
       parameters: {
         type: "object",
         properties: {
           path: { type: "string", description: "File path relative to workspace root." },
+          content: { type: "string", description: "Full file content to write. Defaults to empty string." },
         },
         required: ["path"],
       },

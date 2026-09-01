@@ -23,14 +23,15 @@ CRITICAL RULES:
 - If you don't already know the relevant files from this conversation, explore first with list_files/list_symbols/search_files.
 - If the user confirmed a proposed change ("yes", "do it", "fix it", "continue"), apply it immediately — do not re-explore or re-explain.
 - When editing existing files, always read the file first to get its hash, then use apply_patch with the expectedHash.
-- When creating new files, use write_file without expectedHash.
+- When creating new files, use create_file with the path AND content arguments in a single call. Do NOT create an empty file and then write to it — pass the full content directly to create_file.
 - Run tests after making changes to verify your work.
 - Use git_checkpoint before risky changes.
 - Be concise in your explanations. Show the user what you're doing via tool calls.
 - After running execute_command or run_tests, always quote the relevant stdout/stderr in your final reply — the user cannot see raw tool payloads unless they expand a card. Never finish a turn with only tool calls and no text.
 - NEVER claim success when tool output shows failure. Read command output and test results carefully. If output contains "failed", "error", "✗", "Match: False", "traceback", or a non-zero exit code, report the failure honestly and attempt to fix it.
 - If a tool call fails, read the error message carefully and fix the issue — do not give up or ask the user for help.
-- NEVER end your response with "Would you like me to..." or "Do you want me to..." or similar offers. Just do the next logical thing. The user will tell you if they want something different.`;
+- NEVER end your response with "Would you like me to..." or "Do you want me to..." or similar offers. Just do the next logical thing. The user will tell you if they want something different.
+- NEVER announce an action ("I'll create...", "I'll add...", "Let me write...") without immediately following through with the corresponding tool call in the same response. If you say you're going to do something, DO it — do not describe the plan and then stop.`;
 
 export interface EngineOptions {
   provider: LLMProvider;
@@ -304,6 +305,26 @@ export class AgentEngine {
 
           try {
             const result: ToolResult = await handler(parsedArgs, ctx);
+
+            // When a handler reports a logical failure (e.g. no test framework
+            // detected), surface it as a tool.error so the UI shows it red
+            // instead of a silent null result.
+            if (!result.success) {
+              const errorMsg = result.error ?? "Tool execution failed";
+              yield emit("tool.error", {
+                toolCallId: tc.id,
+                toolName: tc.function.name,
+                error: errorMsg,
+              });
+              session.messages.push({
+                role: "tool",
+                content: JSON.stringify({ error: errorMsg }),
+                toolCallId: tc.id,
+                name: tc.function.name,
+              });
+              continue;
+            }
+
             yield emit("tool.result", {
               toolCallId: tc.id,
               toolName: tc.function.name,
@@ -325,7 +346,7 @@ export class AgentEngine {
 
             session.messages.push({
               role: "tool",
-              content: JSON.stringify(result.success ? result.output : { error: result.error }),
+              content: JSON.stringify(result.output),
               toolCallId: tc.id,
               name: tc.function.name,
             });

@@ -121,6 +121,53 @@ class ChatStore {
     this.streaming = false;
   }
 
+  /**
+   * Serialize the current conversation to a plain-text transcript suitable for
+   * sharing / debugging. Includes every user + assistant message, all tool
+   * calls with their args and results/errors, and the session id + model used.
+   */
+  toTranscript(): string {
+    const lines: string[] = [];
+    if (this.sessionId) lines.push(`Session: ${this.sessionId}`);
+    if (this.selectedModel) lines.push(`Model: ${this.selectedModel.id}`);
+    lines.push(`Messages: ${this.messages.length}`);
+    lines.push("=".repeat(60));
+
+    for (const msg of this.messages) {
+      const ts = new Date(msg.timestamp).toISOString();
+      lines.push("");
+      lines.push(`[${ts}] ${msg.role.toUpperCase()}${msg.modelUsed ? ` (${msg.modelUsed})` : ""}:`);
+      if (msg.content.trim()) {
+        lines.push(msg.content);
+      }
+      if (msg.toolCalls && msg.toolCalls.length > 0) {
+        for (const tc of msg.toolCalls) {
+          lines.push("");
+          const status = tc.error
+            ? "ERROR"
+            : tc.pending
+              ? "PENDING"
+              : tc.result !== undefined
+                ? "OK"
+                : "?";
+          lines.push(`  --- TOOL: ${tc.name} [${status}]${tc.cached ? " (cached)" : ""} ---`);
+          lines.push(`  args: ${JSON.stringify(tc.args)}`);
+          if (tc.error) {
+            lines.push(`  error: ${tc.error}`);
+          } else if (tc.result !== undefined) {
+            const resultStr = typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result, null, 2);
+            // Indent multi-line results for readability.
+            lines.push(`  result: ${resultStr.replace(/\n/g, "\n  ")}`);
+          }
+        }
+      }
+    }
+
+    lines.push("");
+    lines.push("=".repeat(60));
+    return lines.join("\n");
+  }
+
   handleEvent(assistantId: string, event: AgentEvent) {
     switch (event.type) {
       case "text.delta": {

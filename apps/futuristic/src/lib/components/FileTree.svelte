@@ -17,6 +17,7 @@
     IconEye,
     IconEyeOff,
     IconTrash,
+    IconFolderShare,
   } from "@tabler/icons-svelte";
 
   const dispatch = createEventDispatcher();
@@ -24,6 +25,7 @@
   let searchQuery = $state("");
   let pendingDelete = $state<string | null>(null);
   let deleting = $state(false);
+  let revealing = $state<string | null>(null);
 
   function toggle(path: string) {
     if (expanded.has(path)) {
@@ -68,6 +70,21 @@
     } finally {
       deleting = false;
       pendingDelete = null;
+    }
+  }
+
+  async function reveal(nodePath: string, e: MouseEvent) {
+    e.stopPropagation();
+    if (!workspaceStore.workspace?.rootPath) return;
+    revealing = nodePath;
+    try {
+      await fetch("/api/files/reveal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ root: workspaceStore.workspace.rootPath, path: nodePath }),
+      });
+    } finally {
+      revealing = null;
     }
   }
 
@@ -215,6 +232,17 @@
             <span class="ext-badge {meta.class} mr-1">{meta.label}</span>
           {/if}
           <span class="truncate flex-1 {isActive ? 'font-bold' : ''}">{node.name}</span>
+          {#if node.zone !== "protected"}
+            <button
+              class="tree-action-btn"
+              onclick={(e) => reveal(node.path, e)}
+              disabled={revealing === node.path}
+              title="Reveal in Finder"
+              aria-label="Reveal {node.name} in Finder"
+            >
+              <IconFolderShare size={12} />
+            </button>
+          {/if}
           {#if node.type === "file" && node.zone !== "protected"}
             <button
               class="tree-delete-btn"

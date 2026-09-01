@@ -122,8 +122,9 @@ export const writeFileHandler: ToolHandler = async (args, ctx) => {
 
 export const createFileHandler: ToolHandler = async (args, ctx) => {
   const filePath = args.path as string;
+  const content = (args.content as string) ?? "";
   assertAgentPathAccess(filePath, "create");
-  const result = await ctx.workspace.createFile(filePath);
+  const result = await ctx.workspace.createFile(filePath, content);
   return { success: true, output: result };
 };
 
@@ -166,11 +167,30 @@ export const runTestsHandler: ToolHandler = async (args, ctx) => {
   } else if (hasCargo) {
     command = filter ? `cargo test ${filter}` : "cargo test";
   } else {
-    return {
-      success: false,
-      output: null,
-      error: "No test framework detected (looked for pytest.ini, pyproject.toml, package.json, Cargo.toml)",
+    // Fallback: look for Python test files (test_*.py / *_test.py) and run
+    // pytest directly — it auto-discovers them without a config file.
+    const tree = await ctx.workspace.listTree("", 0, { showHidden: true, filterForAgent: true });
+    const flat: string[] = [];
+    const walk = (nodes: any[], prefix: string) => {
+      for (const n of nodes) {
+        const p = prefix ? `${prefix}/${n.name}` : n.name;
+        if (n.type === "file") flat.push(p);
+        if (n.type === "dir" && n.children) walk(n.children, p);
+      }
     };
+    walk(tree, "");
+    const hasPyTests = flat.some(
+      (f) => /^test_.*\.py$/.test(f) || /_test\.py$/.test(f),
+    );
+    if (hasPyTests) {
+      command = filter ? `python -m pytest -k "${filter}" -v` : "python -m pytest -v";
+    } else {
+      return {
+        success: false,
+        output: null,
+        error: "No test framework detected (looked for pytest.ini, pyproject.toml, package.json, Cargo.toml, test_*.py)",
+      };
+    }
   }
 
   const result = await ctx.workspace.executeCommand(command, 60_000);

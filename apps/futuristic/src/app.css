@@ -950,6 +950,35 @@ html, body {
   background: rgba(var(--error-rgb), 0.12);
 }
 
+/* Reveal-in-Finder button on file tree items — visible on hover */
+.tree-action-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: var(--color-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.15s ease;
+}
+.tree-item:hover .tree-action-btn {
+  opacity: 0.6;
+}
+.tree-action-btn:hover {
+  opacity: 1 !important;
+  color: var(--color-accent);
+  background: rgba(var(--accent-rgb), 0.12);
+}
+.tree-action-btn:disabled {
+  opacity: 0.4 !important;
+  cursor: wait;
+}
+
 /* Delete confirmation modal */
 .delete-confirm-overlay {
   position: fixed;

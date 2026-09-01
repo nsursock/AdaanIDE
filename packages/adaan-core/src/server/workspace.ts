@@ -248,7 +248,7 @@ export class Workspace {
 
   // --- Create ----------------------------------------------------------------
 
-  async createFile(input: string): Promise<{ path: string }> {
+  async createFile(input: string, content = ""): Promise<{ path: string; hash: string }> {
     const abs = this.resolve(input);
     try {
       await fs.stat(abs);
@@ -259,8 +259,8 @@ export class Workspace {
       if (e.message.includes("already exists")) throw e;
     }
     await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.writeFile(abs, "", "utf-8");
-    return { path: this.relative(abs) };
+    await fs.writeFile(abs, content, "utf-8");
+    return { path: this.relative(abs), hash: sha256(content) };
   }
 
   async createDir(input: string): Promise<{ path: string }> {
@@ -276,6 +276,36 @@ export class Workspace {
     await fs.rm(abs, { recursive: false }).catch(() => {
       throw new Error(`Cannot delete: ${input}`);
     });
+    return { path: this.relative(abs) };
+  }
+
+  /**
+   * Reveal a file or folder in the host OS file manager (Finder on macOS,
+   * Explorer on Windows, the default file manager on Linux). The path must
+   * exist within the workspace root.
+   */
+  async revealInFinder(input: string): Promise<{ path: string }> {
+    const abs = this.resolve(input);
+    // Verify the path exists — reveal makes no sense for a missing entry.
+    await fs.access(abs).catch(() => {
+      throw new Error(`Path does not exist: ${input}`);
+    });
+
+    const platform = os.platform();
+    if (platform === "darwin") {
+      // `open -R` reveals the file/folder in Finder.
+      await execAsync(`open -R "${abs}"`);
+    } else if (platform === "win32") {
+      // `explorer /select,<path>` highlights the file in Explorer.
+      await execAsync(`explorer /select,${abs}`);
+    } else {
+      // Linux: no standard "reveal" — open the item itself (folder opens in
+      // file manager; file opens with default app). For a file, open its
+      // parent directory instead so the behavior matches the other platforms.
+      const stat = await fs.stat(abs);
+      const target = stat.isDirectory() ? abs : path.dirname(abs);
+      await execAsync(`xdg-open "${target}"`);
+    }
     return { path: this.relative(abs) };
   }
 
@@ -620,6 +650,17 @@ function applySimplePatch(original: string, patch: string): PatchResult {
     }
 
     if (searchLines.length === 0) continue;
+
+    // A SEARCH block with no REPLACE section would silently delete the
+    // matched lines — that's almost never what the model intended. Require
+    // an explicit (possibly empty) REPLACE section to confirm deletion.
+    if (state === "search") {
+      return {
+        success: false,
+        content,
+        error: `SEARCH block has no REPLACE section — refusing to silently delete lines. Add "REPLACE" (even if empty) to delete:\n${searchLines.join("\n").slice(0, 200)}...`,
+      };
+    }
 
     const searchText = searchLines.join("\n");
     const replaceText = replaceLines.join("\n");

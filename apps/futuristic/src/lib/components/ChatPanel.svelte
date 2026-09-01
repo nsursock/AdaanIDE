@@ -14,15 +14,19 @@
     IconTerminal2,
     IconFlame,
     IconCpu,
+    IconClipboard,
+    IconCheck,
   } from "@tabler/icons-svelte";
 
-  let { workspaceRoot } = $props();
+  let { workspaceRoot, onFileChanged = () => {} } = $props();
 
   let input = $state("");
   let models = $state<{ free: ModelInfo[]; paid: ModelInfo[] } | null>(null);
   let eventSource: EventSource | null = null;
   let pendingApprovals = $state<Array<{ sessionId: string; toolCallId: string; toolName: string; args: any }>>([]);
   let messagesContainer: HTMLDivElement;
+  let copied = $state(false);
+  let copyTimer: ReturnType<typeof setTimeout> | undefined;
 
   const quickPrompts = [
     "Explain project structure",
@@ -111,6 +115,16 @@
         const toolName = event.data.toolName as string;
         if (toolName === "apply_patch" || toolName === "write_file") {
           handleAgentFileChange(event.data);
+        }
+        // Any file-modifying tool should refresh the file browser so new
+        // files appear and deleted ones disappear.
+        if (
+          toolName === "apply_patch" ||
+          toolName === "write_file" ||
+          toolName === "create_file" ||
+          toolName === "delete_file"
+        ) {
+          onFileChanged();
         }
       }
 
@@ -214,6 +228,19 @@
     pendingApprovals = [];
   }
 
+  async function copyTranscript() {
+    if (chatStore.messages.length === 0) return;
+    const text = chatStore.toTranscript();
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+      if (copyTimer) clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => (copied = false), 2000);
+    } catch {
+      // clipboard may be unavailable (e.g. non-secure context) — ignore
+    }
+  }
+
   $effect(() => {
     const _ = chatStore.messages.length;
     if (messagesContainer) {
@@ -246,6 +273,21 @@
           <span>Ready</span>
         {/if}
       </span>
+
+      <button
+        class="icon-btn"
+        style="width:1.6rem;height:1.6rem;"
+        onclick={copyTranscript}
+        disabled={chatStore.messages.length === 0}
+        title="Copy transcript to clipboard"
+        aria-label="Copy transcript"
+      >
+        {#if copied}
+          <IconCheck size={13} class="text-[var(--color-success)]" />
+        {:else}
+          <IconClipboard size={13} />
+        {/if}
+      </button>
 
       <button
         class="icon-btn"

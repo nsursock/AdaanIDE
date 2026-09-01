@@ -298,7 +298,7 @@
           class="panel-enter pane pane-bracketed flex flex-col overflow-hidden rounded-lg"
           style="width: {chatWidth}px;"
         >
-          <ChatPanel {workspaceRoot} />
+          <ChatPanel {workspaceRoot} onFileChanged={loadTree} />
         </aside>
       </div>
     {/if}
