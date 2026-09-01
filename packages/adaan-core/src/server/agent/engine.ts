@@ -12,6 +12,9 @@ import type { LLMProvider } from "./provider.js";
 import type { ToolRegistry } from "./tools/registry.js";
 import type { AgentSession } from "./session.js";
 import { estimateTotalTokens, pruneMessages } from "./context.js";
+import { telemetryStore, type ActiveTask } from "../telemetry/index.js";
+import type { RequestType } from "../telemetry/types.js";
+import type { TaskSummaryData } from "../../types.js";
 
 const MAX_ITERATIONS = 10;
 const SYSTEM_PROMPT = `You are AdaanIDE, an autonomous coding agent integrated into a development IDE.
@@ -23,6 +26,18 @@ CRITICAL RULES:
 - If you don't already know the relevant files from this conversation, explore first with list_files/list_symbols/search_files.
 - If the user confirmed a proposed change ("yes", "do it", "fix it", "continue"), apply it immediately — do not re-explore or re-explain.
 - When editing existing files, always read the file first to get its hash, then use apply_patch with the expectedHash.
+- apply_patch REQUIRES SEARCH/REPLACE markers. The SEARCH section must contain the EXACT original lines (copied from read_file output), and REPLACE contains the new lines. Do NOT send bare replacement code without markers — it will be rejected. Format:
+  SEARCH
+  <exact original lines from the file>
+  REPLACE
+  <new lines to put in their place>
+  ---
+  SEARCH
+  <another block's original lines>
+  REPLACE
+  <new lines>
+  To delete lines, use an empty REPLACE section.
+- execute_command runs from the workspace root — do NOT cd to other directories (e.g. /home/user). Just run the command directly (e.g. "python3 algos.py", not "cd /home/user && python3 algos.py").
 - When creating new files, use create_file with the path AND content arguments in a single call. Do NOT create an empty file and then write to it — pass the full content directly to create_file.
 - When asked to code, build, or implement an app, game, component, or algorithm, complete the ENTIRE implementation. Write all required files (HTML, CSS, JS, Svelte, components, tests, etc.) to disk. Do not stop after only listing files or creating directories.
 - NEVER output full file contents as markdown code blocks in chat. ALWAYS use create_file or apply_patch to write code directly to disk.
@@ -84,6 +99,27 @@ export class AgentEngine {
     session.resume();
     session.messages.push({ role: "user", content: userMessage });
 
+    // --- Telemetry: begin tracking this user task ---------------------------
+    await telemetryStore.load();
+    const task = telemetryStore.startTask(session.id, model, userMessage);
+    let taskStatus: "success" | "error" | "cancelled" = "success";
+    let taskFinalized = false;
+    const finalizeTask = (): TaskSummaryData => {
+      if (taskFinalized) return {} as TaskSummaryData;
+      taskFinalized = true;
+      const rec = telemetryStore.finishTask(task, taskStatus);
+      return {
+        requestCount: rec.requestCount,
+        toolCalls: rec.toolCalls,
+        cacheHits: rec.cacheHits,
+        inputTokens: rec.inputTokens,
+        outputTokens: rec.outputTokens,
+        cost: rec.cost,
+        durationMs: rec.durationMs,
+        status: rec.status,
+      };
+    };
+
     try {
       let iteration = 0;
 
@@ -97,14 +133,21 @@ export class AgentEngine {
         let providerMessages = this.buildProviderMessages(session);
 
         // Prune if approaching context limit
-        const totalTokens = estimateTotalTokens(providerMessages);
-        if (totalTokens > contextLength - 2000) {
+        const rawContextTokens = estimateTotalTokens(providerMessages);
+        let prunedThisIteration = 0;
+        if (rawContextTokens > contextLength - 2000) {
           const { messages: pruned, prunedCount } = pruneMessages(providerMessages, contextLength);
           providerMessages = pruned;
+          prunedThisIteration = prunedCount;
           if (prunedCount > 0) {
             yield emit("context.pruned", { prunedCount, remainingTokens: contextLength - estimateTotalTokens(pruned) });
           }
         }
+        const actualContextTokens = estimateTotalTokens(providerMessages);
+
+        // Classify this request from the task's running state.
+        const requestType: RequestType = telemetryStore.classifyRequest(task);
+        const requestStart = Date.now();
 
         // Get tools
         const tools: ProviderTool[] = this.registry.allSchemas as ProviderTool[];
@@ -114,6 +157,13 @@ export class AgentEngine {
         let assistantToolCalls: ToolCall[] = [];
         let finishReason: string = "stop";
         let modelUsed = model;
+        let capturedUsage: {
+          inputTokens: number;
+          outputTokens: number;
+          cachedTokens: number;
+          reasoningTokens: number;
+          cost: number;
+        } | undefined;
 
         const toolCallArgs: Map<number, { id: string; name: string; args: string }> = new Map();
 
@@ -162,9 +212,16 @@ export class AgentEngine {
                 break;
               }
               case "finish": {
-                const data = event.data as { finishReason: string; model: string };
+                const data = event.data as { finishReason: string; model: string; usage?: {
+                  inputTokens: number;
+                  outputTokens: number;
+                  cachedTokens: number;
+                  reasoningTokens: number;
+                  cost: number;
+                } };
                 finishReason = data.finishReason;
                 modelUsed = data.model;
+                if (data.usage) capturedUsage = data.usage;
                 yield emit("model.used", { modelId: data.model, modelName: data.model });
                 break;
               }
@@ -175,7 +232,9 @@ export class AgentEngine {
               }
               case "error": {
                 if (session.isCancelled()) {
+                  taskStatus = "cancelled";
                   yield emit("cancelled");
+                  yield emit("task.summary", finalizeTask());
                   return;
                 }
                 const data = event.data as {
@@ -183,31 +242,89 @@ export class AgentEngine {
                   allFreeModelsExhausted?: boolean;
                   triedModels?: string[];
                 };
+                // The provider attempted at least one request that failed —
+                // record it so it counts against the daily request budget.
+                telemetryStore.recordRequest(task, {
+                  model: modelUsed,
+                  requestType,
+                  contextTokens: actualContextTokens,
+                  rawContextTokens,
+                  prunedMessages: prunedThisIteration,
+                  iteration,
+                  latencyMs: Date.now() - requestStart,
+                  inputTokens: capturedUsage?.inputTokens ?? 0,
+                  outputTokens: capturedUsage?.outputTokens ?? 0,
+                  cachedTokens: capturedUsage?.cachedTokens ?? 0,
+                  reasoningTokens: capturedUsage?.reasoningTokens ?? 0,
+                  cost: capturedUsage?.cost ?? 0,
+                  success: false,
+                });
                 // If every free model we tried is currently unavailable,
                 // give the user the option to fall back to a paid model
                 // instead of just reporting a dead end.
                 if (data.allFreeModelsExhausted) {
+                  taskStatus = "error";
                   yield emit("model.free_exhausted", {
                     message: data.message,
                     triedModels: data.triedModels ?? [],
                   });
                 } else {
+                  taskStatus = "error";
                   yield emit("error", { message: data.message });
                 }
+                yield emit("task.summary", finalizeTask());
                 session.status = "error";
                 return;
               }
             }
           }
         } catch (e: any) {
+          // The request was sent to the provider even though it threw — it
+          // still counts against OpenRouter's daily cap, so record it.
+          telemetryStore.recordRequest(task, {
+            model: modelUsed,
+            requestType,
+            contextTokens: actualContextTokens,
+            rawContextTokens,
+            prunedMessages: prunedThisIteration,
+            iteration,
+            latencyMs: Date.now() - requestStart,
+            inputTokens: capturedUsage?.inputTokens ?? 0,
+            outputTokens: capturedUsage?.outputTokens ?? 0,
+            cachedTokens: capturedUsage?.cachedTokens ?? 0,
+            reasoningTokens: capturedUsage?.reasoningTokens ?? 0,
+            cost: capturedUsage?.cost ?? 0,
+            success: false,
+          });
           if (session.isCancelled()) {
+            taskStatus = "cancelled";
             yield emit("cancelled");
+            yield emit("task.summary", finalizeTask());
             return;
           }
+          taskStatus = "error";
           yield emit("error", { message: e.message ?? "Provider error" });
+          yield emit("task.summary", finalizeTask());
           session.status = "error";
           return;
         }
+
+        // Record the completed LLM request with real usage from the provider.
+        telemetryStore.recordRequest(task, {
+          model: modelUsed,
+          requestType,
+          contextTokens: actualContextTokens,
+          rawContextTokens,
+          prunedMessages: prunedThisIteration,
+          iteration,
+          latencyMs: Date.now() - requestStart,
+          inputTokens: capturedUsage?.inputTokens ?? 0,
+          outputTokens: capturedUsage?.outputTokens ?? 0,
+          cachedTokens: capturedUsage?.cachedTokens ?? 0,
+          reasoningTokens: capturedUsage?.reasoningTokens ?? 0,
+          cost: capturedUsage?.cost ?? 0,
+          success: true,
+        });
 
         // Add assistant message to session
         const assistantMsg: ChatMessage = {
@@ -265,19 +382,26 @@ export class AgentEngine {
               role: "user",
               content: nudgeContent,
             });
+            telemetryStore.markIterationEnd(task, false);
             iteration++;
             session.iterationCount = iteration;
             continue;
           }
           session.status = "done";
+          taskStatus = "success";
           yield emit("done");
+          yield emit("task.summary", finalizeTask());
           return;
         }
 
         // Execute tool calls
+        let iterationHadError = false;
         for (const tc of assistantToolCalls) {
           if (session.isCancelled()) {
+            taskStatus = "cancelled";
+            telemetryStore.markIterationEnd(task, iterationHadError);
             yield emit("cancelled");
+            yield emit("task.summary", finalizeTask());
             return;
           }
 
@@ -293,6 +417,8 @@ export class AgentEngine {
               toolName: tc.function.name,
               error: "Malformed tool arguments (invalid JSON)",
             });
+            telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: false });
+            iterationHadError = true;
             session.messages.push({
               role: "tool",
               content: JSON.stringify({
@@ -310,6 +436,7 @@ export class AgentEngine {
           const cached = session.cache.get(cacheKey, parsedArgs);
           if (cached !== null) {
             yield emit("tool.cache_hit", { toolCallId: tc.id, toolName: tc.function.name });
+            telemetryStore.recordToolCall(task, tc.function.name, { cached: true, success: true });
             session.messages.push({
               role: "tool",
               content: JSON.stringify(cached),
@@ -327,6 +454,8 @@ export class AgentEngine {
               toolName: tc.function.name,
               error: `Unknown tool: ${tc.function.name}`,
             });
+            telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: false });
+            iterationHadError = true;
             session.messages.push({
               role: "tool",
               content: JSON.stringify({ error: `Unknown tool: ${tc.function.name}` }),
@@ -365,6 +494,8 @@ export class AgentEngine {
                 toolName: tc.function.name,
                 error: "Delete denied by user",
               });
+              telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: false });
+              iterationHadError = true;
               session.messages.push({
                 role: "tool",
                 content: JSON.stringify({ error: "Delete denied by user" }),
@@ -388,6 +519,8 @@ export class AgentEngine {
                 toolName: tc.function.name,
                 error: errorMsg,
               });
+              telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: false });
+              iterationHadError = true;
               session.messages.push({
                 role: "tool",
                 content: JSON.stringify({ error: errorMsg }),
@@ -402,6 +535,7 @@ export class AgentEngine {
               toolName: tc.function.name,
               result: result.output,
             });
+            telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: true });
 
             // Cache the result
             const filePath = parsedArgs.path as string | undefined;
@@ -431,6 +565,8 @@ export class AgentEngine {
               toolName: tc.function.name,
               error: errorMsg,
             });
+            telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: false });
+            iterationHadError = true;
 
             session.messages.push({
               role: "tool",
@@ -441,6 +577,7 @@ export class AgentEngine {
           }
         }
 
+        telemetryStore.markIterationEnd(task, iterationHadError);
         iteration++;
         session.iterationCount = iteration;
       }
@@ -448,7 +585,9 @@ export class AgentEngine {
       // Hit iteration cap — one last text-only turn so command output
       // actually reaches the user instead of dying on a silent tool card.
       if (session.isCancelled()) {
+        taskStatus = "cancelled";
         yield emit("cancelled");
+        yield emit("task.summary", finalizeTask());
         return;
       }
 
@@ -458,6 +597,15 @@ export class AgentEngine {
         content: "You have reached the tool-call limit. Do not call any more tools. Summarize what you did and quote any command stdout/stderr the user asked to see.",
       });
 
+      const summaryRawTokens = estimateTotalTokens(summaryMessages);
+      const summaryRequestStart = Date.now();
+      let summaryUsage: {
+        inputTokens: number;
+        outputTokens: number;
+        cachedTokens: number;
+        reasoningTokens: number;
+        cost: number;
+      } | undefined;
       let summaryText = "";
       try {
         for await (const event of this.provider.chat(summaryMessages, {
@@ -468,27 +616,92 @@ export class AgentEngine {
             const data = event.data as { text: string };
             summaryText += data.text;
             yield emit("text.delta", { text: data.text });
+          } else if (event.type === "finish") {
+            const data = event.data as { usage?: typeof summaryUsage };
+            if (data.usage) summaryUsage = data.usage;
           } else if (event.type === "error") {
             const data = event.data as { message: string };
+            telemetryStore.recordRequest(task, {
+              model: session.modelUsed || model,
+              requestType: "final_response",
+              contextTokens: summaryRawTokens,
+              rawContextTokens: summaryRawTokens,
+              prunedMessages: 0,
+              iteration,
+              latencyMs: Date.now() - summaryRequestStart,
+              inputTokens: summaryUsage?.inputTokens ?? 0,
+              outputTokens: summaryUsage?.outputTokens ?? 0,
+              cachedTokens: summaryUsage?.cachedTokens ?? 0,
+              reasoningTokens: summaryUsage?.reasoningTokens ?? 0,
+              cost: summaryUsage?.cost ?? 0,
+              success: false,
+            });
+            taskStatus = "error";
             yield emit("error", { message: data.message });
+            yield emit("task.summary", finalizeTask());
             session.status = "error";
             return;
           }
         }
       } catch (e: any) {
+        telemetryStore.recordRequest(task, {
+          model: session.modelUsed || model,
+          requestType: "final_response",
+          contextTokens: summaryRawTokens,
+          rawContextTokens: summaryRawTokens,
+          prunedMessages: 0,
+          iteration,
+          latencyMs: Date.now() - summaryRequestStart,
+          inputTokens: summaryUsage?.inputTokens ?? 0,
+          outputTokens: summaryUsage?.outputTokens ?? 0,
+          cachedTokens: summaryUsage?.cachedTokens ?? 0,
+          reasoningTokens: summaryUsage?.reasoningTokens ?? 0,
+          cost: summaryUsage?.cost ?? 0,
+          success: false,
+        });
+        taskStatus = "error";
         yield emit("error", { message: e.message ?? "Failed to summarize after tool-step limit" });
+        yield emit("task.summary", finalizeTask());
         session.status = "error";
         return;
       }
+
+      telemetryStore.recordRequest(task, {
+        model: session.modelUsed || model,
+        requestType: "final_response",
+        contextTokens: summaryRawTokens,
+        rawContextTokens: summaryRawTokens,
+        prunedMessages: 0,
+        iteration,
+        latencyMs: Date.now() - summaryRequestStart,
+        inputTokens: summaryUsage?.inputTokens ?? 0,
+        outputTokens: summaryUsage?.outputTokens ?? 0,
+        cachedTokens: summaryUsage?.cachedTokens ?? 0,
+        reasoningTokens: summaryUsage?.reasoningTokens ?? 0,
+        cost: summaryUsage?.cost ?? 0,
+        success: true,
+      });
 
       if (summaryText) {
         session.messages.push({ role: "assistant", content: summaryText });
       }
       session.status = "done";
+      taskStatus = "success";
       yield emit("done");
+      yield emit("task.summary", finalizeTask());
     } catch (e: any) {
       session.status = "error";
+      taskStatus = "error";
       yield emit("error", { message: e.message ?? "Engine error" });
+      yield emit("task.summary", finalizeTask());
+    } finally {
+      // If the generator was abandoned mid-turn (e.g. the consumer started a
+      // new turn), the explicit finalize calls above were skipped — record
+      // the task as cancelled so it doesn't leak as an in-flight task.
+      if (!taskFinalized) {
+        taskStatus = "cancelled";
+        finalizeTask();
+      }
     }
   }
 

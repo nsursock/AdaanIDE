@@ -1,4 +1,4 @@
-import type { AgentEvent, ModelInfo, ModelGroups } from "../types.js";
+import type { AgentEvent, ModelInfo, ModelGroups, TaskSummaryData } from "../types.js";
 import { settingsStore } from "./settings.svelte.js";
 
 export interface ChatMessageEntry {
@@ -27,6 +27,9 @@ export interface ChatMessageEntry {
   /** Set when every free model we tried for this turn is currently
    *  unavailable — the UI should offer to retry with a paid model. */
   freeModelsExhausted?: { message: string; triedModels: string[] };
+  /** Per-task cost/token footer, emitted at the end of a turn so the UI can
+   *  show `7 reqs · 92k tokens · $0.031 · 84s` under the assistant message. */
+  taskSummary?: TaskSummaryData;
 }
 
 class ChatStore {
@@ -301,6 +304,14 @@ class ChatStore {
       case "cancelled":
         this.finishStreaming();
         break;
+      case "task.summary": {
+        const data = event.data as TaskSummaryData | undefined;
+        if (data) {
+          const msg = this.messages.find((m) => m.id === assistantId);
+          if (msg) msg.taskSummary = data;
+        }
+        break;
+      }
       case "error": {
         const data = event.data as { message?: string } | undefined;
         if (data?.message) {

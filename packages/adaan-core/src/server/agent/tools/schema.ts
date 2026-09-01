@@ -67,7 +67,7 @@ export const TOOL_SCHEMAS: ProviderTool[] = [
     type: "function",
     function: {
       name: "apply_patch",
-      description: "Apply a SEARCH/REPLACE patch to a file. Requires expectedHash from a prior read_file. Format: blocks of 'SEARCH\\n<original lines>\\nREPLACE\\n<new lines>' separated by '---'. Every SEARCH block MUST have a REPLACE section — to delete lines, use 'REPLACE' with nothing after it.",
+      description: "Apply a SEARCH/REPLACE patch to a file. Requires expectedHash from a prior read_file. The patch MUST use SEARCH/REPLACE markers — bare code without markers will be rejected.\n\nFormat:\n```\nSEARCH\n<exact original lines from the file>\nREPLACE\n<new lines to put in their place>\n---\nSEARCH\n<another block's original lines>\nREPLACE\n<new lines>\n```\n\nRules:\n- Every SEARCH block MUST have a REPLACE section (use empty REPLACE to delete lines).\n- The SEARCH text must match the file exactly (copy it from read_file output).\n- Separate multiple blocks with a line of 3+ dashes (---).",
       parameters: {
         type: "object",
         properties: {
@@ -128,11 +128,11 @@ export const TOOL_SCHEMAS: ProviderTool[] = [
     type: "function",
     function: {
       name: "execute_command",
-      description: "Execute a shell command in the workspace root. Subject to a deny-list and 30s timeout. Returns stdout, stderr, and exit code.",
+      description: "Execute a shell command in the workspace root. The CWD is already the workspace root — do NOT cd to other directories (e.g. /home/user) or prefix commands with cd. Subject to a deny-list and 30s timeout. Returns stdout, stderr, exit code, and the working directory.",
       parameters: {
         type: "object",
         properties: {
-          command: { type: "string", description: "Shell command to execute." },
+          command: { type: "string", description: "Shell command to execute (runs from the workspace root)." },
           timeoutMs: { type: "number", description: "Timeout in milliseconds (default 30000)." },
         },
         required: ["command"],

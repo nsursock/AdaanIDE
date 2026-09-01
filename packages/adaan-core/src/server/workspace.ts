@@ -750,7 +750,7 @@ function applySimplePatch(original: string, patch: string): PatchResult {
     return {
       success: false,
       content,
-      error: `No valid SEARCH/REPLACE blocks were found in the patch. Ensure each block uses "### SEARCH" / "### REPLACE" (or "SEARCH" / "REPLACE") markers and block separators are lines of dashes (---). Patch preview:\n${patch.slice(0, 300)}...`,
+      error: `No valid SEARCH/REPLACE blocks were found in the patch. The patch must contain "SEARCH" and "REPLACE" markers — bare code without markers is rejected.\n\nCorrect format:\nSEARCH\n<exact original lines from the file>\nREPLACE\n<new lines>\n---\nSEARCH\n<another block>\nREPLACE\n<new lines>\n\nYour patch was:\n${patch.slice(0, 400)}...`,
     };
   }
 

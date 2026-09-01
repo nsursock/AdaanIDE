@@ -100,6 +100,7 @@ export type AgentEventType =
   | "model.used"
   | "model.fallback"
   | "model.free_exhausted"
+  | "task.summary"
   | "done"
   | "error"
   | "cancelled";
@@ -166,6 +167,19 @@ export interface ModelFallbackData {
 
 export interface ErrorData {
   message: string;
+}
+
+/** Per-task cost/token footer emitted at the end of a turn so the UI can show
+ *  `7 reqs · 92k tokens · $0.031 · 84s` under the assistant message. */
+export interface TaskSummaryData {
+  requestCount: number;
+  toolCalls: number;
+  cacheHits: number;
+  inputTokens: number;
+  outputTokens: number;
+  cost: number;
+  durationMs: number;
+  status: "success" | "error" | "cancelled";
 }
 
 // --- Chat Messages -----------------------------------------------------------
@@ -255,6 +269,15 @@ export interface ProviderToolCallComplete {
 export interface ProviderFinish {
   finishReason: "stop" | "tool_calls" | "length" | "content_filter";
   model: string;
+  /** Real token usage parsed from OpenRouter's final SSE chunk. Present
+   *  whenever the provider reports usage; absent for error/empty streams. */
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens: number;
+    reasoningTokens: number;
+    cost: number;
+  };
 }
 
 export interface ProviderError {

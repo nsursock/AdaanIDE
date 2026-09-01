@@ -31,6 +31,7 @@ Copy `.env.example` to `.env` and set `OPENROUTER_API_KEY`. A $10 credit on Open
 - **Themes**: Retrowave, Ghibli, and Fiesta, with CodeMirror syntax highlighting swapped via extension compartments.
 - **Three.js**: Background particle field in the futuristic app, toggleable via settings.
 - **Settings**: Unified, versioned, persisted to a single `localStorage` blob (`adaan.settings.v1`). Covers theme, panel widths, selected model, and the Three.js toggle. Pure migration logic in `settings.ts` (testable, no runes); reactive store in `settings.svelte.ts`. `themeStore` and `chatStore` delegate persistence to `settingsStore`. Legacy per-feature keys are folded in on first run.
+- **Telemetry**: Phase 1 "Measure" subsystem. Every LLM request and user task is instrumented — real token usage (parsed from OpenRouter's SSE `usage` chunk), cost, latency, request-type heuristic (planning/coding/debugging/final_response), tool classification (read/modify/command/test), cache hits, and context-pruning savings. Daily rollups double as the Phase 3 capability-matrix seed. Persisted to `~/.adaan/telemetry.json` (capped recent records + unbounded daily rollups, debounced writes). Dashboard via `TelemetryPanel.svelte` (app-bar chart icon) and `GET /api/telemetry/summary`; the killer metric is **successful tasks per 1,000 requests** (optimizes against OpenRouter's daily cap). Per-task footer (`7 reqs · 92k tokens · $0.031 · 84s`) under each assistant message via the `task.summary` event.
 
 ## Key Files
 
@@ -38,6 +39,7 @@ Copy `.env.example` to `.env` and set `OPENROUTER_API_KEY`. A $10 credit on Open
 - `packages/adaan-core/src/server/agent/providers/openrouter.ts` — Provider with FSM + rotation
 - `packages/adaan-core/src/server/workspace.ts` — File operations with hash-based locking
 - `packages/adaan-core/src/server/security.ts` — Path + command security
+- `packages/adaan-core/src/server/telemetry/` — Telemetry store, types, persistence, summary (Phase 1)
 - `packages/adaan-core/src/stores/settings.ts` — Pure settings schema + migration logic (versioned, testable)
 - `packages/adaan-core/src/stores/settings.svelte.ts` — Reactive settings store (single localStorage blob)
 - `packages/adaan-core/src/stores/` — Svelte 5 rune stores (settings, theme, workspace, chat)

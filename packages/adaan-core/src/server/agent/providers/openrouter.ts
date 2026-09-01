@@ -371,6 +371,17 @@ export class OpenRouterProvider implements LLMProvider {
     const toolCallAccumulators: Map<number, { id: string; name: string; args: string }> = new Map();
     let finishReason: string = "stop";
     let streamDone = false;
+    // OpenRouter reports real token usage in the final SSE chunk (the one
+    // with finish_reason, or a trailing empty-choices chunk just before
+    // [DONE]). Capture it so the engine can record accurate telemetry
+    // instead of estimating tokens from character counts.
+    let usage: {
+      inputTokens: number;
+      outputTokens: number;
+      cachedTokens: number;
+      reasoningTokens: number;
+      cost: number;
+    } | undefined;
 
     try {
       while (!streamDone) {
@@ -470,6 +481,29 @@ export class OpenRouterProvider implements LLMProvider {
             if (choice.finish_reason) {
               finishReason = choice.finish_reason;
             }
+
+            // Capture usage. OpenRouter sends it on the final chunk (with
+            // finish_reason) or on a trailing chunk with empty choices.
+            // `cost` is OpenRouter's computed cost for this request; the
+            // nested *_details fields carry cached/reasoning breakdowns.
+            if (chunk.usage) {
+              const u = chunk.usage;
+              const cached =
+                u.cached_tokens ??
+                u.prompt_tokens_details?.cached_tokens ??
+                0;
+              const reasoning =
+                u.completion_tokens_details?.reasoning_tokens ??
+                u.reasoning_tokens ??
+                0;
+              usage = {
+                inputTokens: u.prompt_tokens ?? 0,
+                outputTokens: u.completion_tokens ?? 0,
+                cachedTokens: cached,
+                reasoningTokens: reasoning,
+                cost: typeof u.cost === "number" ? u.cost : 0,
+              };
+            }
           } catch {
             // Skip malformed JSON chunks
           }
@@ -508,6 +542,7 @@ export class OpenRouterProvider implements LLMProvider {
       data: {
         finishReason: mapFinishReason(finishReason),
         model: options.model,
+        usage,
       },
     };
   }

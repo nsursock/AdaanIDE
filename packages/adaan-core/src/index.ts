@@ -19,6 +19,7 @@ export type {
   ProviderEvent,
   SessionState,
   SessionStatus,
+  TaskSummaryData,
   WatcherEvent,
   WatcherEventType,
   ToolDefinition,

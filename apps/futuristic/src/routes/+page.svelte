@@ -21,6 +21,7 @@
   import TerminalPane from "$lib/components/TerminalPane.svelte";
   import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
+  import TelemetryPanel from "$lib/components/TelemetryPanel.svelte";
   import {
     IconCode,
     IconMessage,
@@ -31,6 +32,7 @@
     IconFolderCode,
     IconSparkles,
     IconSettings,
+    IconChartBar,
   } from "@tabler/icons-svelte";
 
   let workspaceRoot = $state<string | null>(null);
@@ -38,6 +40,7 @@
   let showChat = $state(true);
   let threeEnabled = $state(true);
   let showSettings = $state(false);
+  let showTelemetry = $state(false);
   let showTerminal = $state(settingsStore.settings.terminalEnabled);
 
   // --- Resizable sidebars ---------------------------------------------------
@@ -233,6 +236,14 @@
       <div class="w-px h-4 mx-0.5 bg-[var(--color-border)] opacity-60"></div>
       <ThemeSwitcher />
       <button
+        class="icon-btn {showTelemetry ? 'active' : ''}"
+        onclick={() => showTelemetry = !showTelemetry}
+        title="Telemetry"
+        aria-label="Open telemetry console"
+      >
+        <IconChartBar size={16} />
+      </button>
+      <button
         class="icon-btn {showSettings ? 'active' : ''}"
         onclick={() => showSettings = !showSettings}
         title="Settings"
@@ -269,8 +280,12 @@
 
     <div class="editor-col flex-1 flex flex-col overflow-hidden gap-1 min-w-0">
       <main class="panel-enter pane pane-bracketed flex-1 flex flex-col overflow-hidden rounded-lg">
-        <Tabs on:close={(e) => workspaceStore.closeTab(e.detail)} />
-        <Editor {workspaceRoot} on:save={(e) => saveFile(e.detail.path, e.detail.content, e.detail.hash)} />
+        {#if showTelemetry}
+          <TelemetryPanel onClose={() => (showTelemetry = false)} />
+        {:else}
+          <Tabs on:close={(e) => workspaceStore.closeTab(e.detail)} />
+          <Editor {workspaceRoot} on:save={(e) => saveFile(e.detail.path, e.detail.content, e.detail.hash)} />
+        {/if}
       </main>
       {#if showTerminal && settingsStore.settings.terminalMode === "editor"}
         <button

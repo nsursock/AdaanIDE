@@ -27,6 +27,18 @@ export type { LLMProvider } from "./agent/provider.js";
 export { ToolRegistry, defaultRegistry } from "./agent/tools/registry.js";
 export { TOOL_SCHEMAS, TOOL_NAMES } from "./agent/tools/schema.js";
 export { listSymbols, extractSymbolContent } from "./agent/tools/symbols.js";
+export { TelemetryStore, telemetryStore, type ActiveTask } from "./telemetry/index.js";
+export type {
+  RequestType,
+  TokenUsage,
+  RequestRecord,
+  TaskStatus,
+  TaskRecord,
+  ModelDailyStats,
+  DailyRollup,
+  TelemetryData,
+  TelemetrySummary,
+} from "./telemetry/index.js";
 export {
   initProvider,
   updateProviderKey,

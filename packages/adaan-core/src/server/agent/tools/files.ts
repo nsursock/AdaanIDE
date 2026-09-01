@@ -174,7 +174,9 @@ export const executeCommandHandler: ToolHandler = async (args, ctx) => {
   const command = args.command as string;
   const timeoutMs = args.timeoutMs as number | undefined;
   const result = await ctx.workspace.executeCommand(command, timeoutMs);
-  return { success: true, output: result };
+  // Include the working directory so the model knows where it is and doesn't
+  // guess wrong paths (e.g. /home/user on a macOS machine).
+  return { success: true, output: { ...result, cwd: ctx.workspace.rootPath } };
 };
 
 export const runTestsHandler: ToolHandler = async (args, ctx) => {
