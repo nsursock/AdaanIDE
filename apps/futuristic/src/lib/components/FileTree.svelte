@@ -248,8 +248,8 @@
 
   <!-- Delete confirmation modal -->
   {#if pendingDelete}
-    <div class="delete-confirm-overlay" onclick={cancelDelete} role="button" tabindex="-1" aria-label="Cancel delete">
-      <div class="delete-confirm-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Confirm file deletion">
+    <div class="delete-confirm-overlay" onclick={cancelDelete} onkeydown={(e) => { if (e.key === "Escape" || e.key === "Enter") cancelDelete(); }} role="button" tabindex="-1" aria-label="Cancel delete">
+      <div class="delete-confirm-dialog" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-label="Confirm file deletion" aria-modal="true" tabindex="-1">
         <div class="flex items-center gap-2 mb-3">
           <IconTrash size={18} class="text-[var(--color-error)] flex-shrink-0" />
           <span class="font-bold text-sm">Delete file?</span>

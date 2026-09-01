@@ -41,8 +41,8 @@
         models = await res.json();
         // Restore the user's last-selected model if it's still available;
         // otherwise fall back to the first free tools-capable model.
-        if (!chatStore.restoreModel(models)) {
-          const free = models?.free?.find((m) => m.toolsCapable);
+        if (models && !chatStore.restoreModel(models)) {
+          const free = models.free.find((m) => m.toolsCapable);
           if (free) chatStore.setModel(free);
         }
       }

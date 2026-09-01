@@ -771,6 +771,10 @@ html, body {
 
 /* Vertical drag handle between panes */
 .resizer {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
   flex-shrink: 0;
   width: 4px;
   margin: 0 -1.5px;
@@ -800,6 +804,10 @@ html, body {
 
 /* Horizontal drag handle above the bottom terminal pane */
 .terminal-resizer {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
   flex-shrink: 0;
   height: 4px;
   margin: 0 -1px;

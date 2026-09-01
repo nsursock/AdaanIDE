@@ -255,13 +255,13 @@
         >
           <FileTree on:open={(e) => openFile(e.detail)} on:refresh={loadTree} />
         </aside>
-        <div
+        <button
+          type="button"
           class="resizer"
           onmousedown={(e) => startResize("sidebar", e)}
-          role="separator"
-          aria-orientation="vertical"
           tabindex="-1"
-        ></div>
+          aria-label="Resize sidebar"
+        ></button>
       </div>
     {/if}
 
@@ -271,13 +271,13 @@
         <Editor on:save={(e) => saveFile(e.detail.path, e.detail.content, e.detail.hash)} />
       </main>
       {#if showTerminal && settingsStore.settings.terminalMode === "editor"}
-        <div
+        <button
+          type="button"
           class="terminal-resizer"
           onmousedown={startTerminalResize}
-          role="separator"
-          aria-orientation="horizontal"
           tabindex="-1"
-        ></div>
+          aria-label="Resize terminal"
+        ></button>
         <TerminalPane {workspaceRoot} height={terminalHeight} />
       {/if}
     </div>
@@ -287,13 +287,13 @@
         class="chat-wrap"
         transition:fly={{ x: chatWidth, duration: 280, easing: cubicInOut, opacity: 0 }}
       >
-        <div
+        <button
+          type="button"
           class="resizer"
           onmousedown={(e) => startResize("chat", e)}
-          role="separator"
-          aria-orientation="vertical"
           tabindex="-1"
-        ></div>
+          aria-label="Resize chat panel"
+        ></button>
         <aside
           class="panel-enter pane pane-bracketed flex flex-col overflow-hidden rounded-lg"
           style="width: {chatWidth}px;"
@@ -305,13 +305,13 @@
   </div>
 
   {#if showTerminal && settingsStore.settings.terminalMode === "full"}
-    <div
+    <button
+      type="button"
       class="terminal-resizer"
       onmousedown={startTerminalResize}
-      role="separator"
-      aria-orientation="horizontal"
       tabindex="-1"
-    ></div>
+      aria-label="Resize terminal"
+    ></button>
     <TerminalPane {workspaceRoot} height={terminalHeight} />
   {/if}
 {/if}

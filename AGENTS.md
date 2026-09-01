@@ -41,3 +41,7 @@ Copy `.env.example` to `.env` and set `OPENROUTER_API_KEY`. A $10 credit on Open
 - `packages/adaan-core/src/stores/settings.ts` — Pure settings schema + migration logic (versioned, testable)
 - `packages/adaan-core/src/stores/settings.svelte.ts` — Reactive settings store (single localStorage blob)
 - `packages/adaan-core/src/stores/` — Svelte 5 rune stores (settings, theme, workspace, chat)
+
+---
+
+No AI signature in commit messages or code comments.
