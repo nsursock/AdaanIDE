@@ -12,6 +12,7 @@ import type {
   TelemetrySummary,
   RequestType,
 } from "./types.js";
+import { isUpgrade, type Outcome } from "../learn/outcome.js";
 
 const TELEMETRY_FILE = path.join(os.homedir(), ".adaan", "telemetry.json");
 const MAX_RECENT_TASKS = 500;
@@ -44,6 +45,13 @@ function emptyRollup(day: string): DailyRollup {
     rawContextTokens: 0,
     actualContextTokens: 0,
     prunedMessages: 0,
+    truncationTokensSaved: 0,
+    compactionTokensSaved: 0,
+    redundantCallsAvoided: 0,
+    snapshotTasks: 0,
+    autoRoutedTasks: 0,
+    escalations: 0,
+    escalationSuccesses: 0,
     totalTaskDurationMs: 0,
     perModel: {},
   };
@@ -91,6 +99,24 @@ export interface ActiveTask {
   rawContextTokens: number;
   actualContextTokens: number;
   prunedMessages: number;
+  /** Tokens saved by truncating large tool results before history (A1). */
+  truncationTokensSaved: number;
+  /** Tokens saved by compacting old tool messages during pruning (A2). */
+  compactionTokensSaved: number;
+  /** Number of redundant tool calls blocked by the repeat-failure guard (B1). */
+  redundantCallsAvoided: number;
+  /** Whether a workspace snapshot was injected on this task's first request (A3). */
+  snapshotInjected: boolean;
+  /** Phase 3: whether this task was routed by the adaptive router or manually. */
+  routedBy: "auto" | "manual";
+  /** Phase 3: task category from the classifier. */
+  category: string | null;
+  /** Phase 3: number of intra-task escalations. */
+  escalations: number;
+  /** Phase 4: implicit outcome signal. */
+  outcome: string;
+  /** Phase 4: test results from run_tests (for outcome detection). */
+  testResults: unknown[];
   /** Tracks whether the previous iteration ended in a tool error, to classify
    *  the next request as "debugging" rather than "coding". */
   lastIterationHadError: boolean;
@@ -126,11 +152,29 @@ export class TelemetryStore {
       const raw = await fs.readFile(this.filePath, "utf-8");
       const parsed = JSON.parse(raw) as TelemetryData;
       if (parsed && parsed.version === 1) {
+        // Backfill Phase 2 reduction fields on old rollups that were
+        // persisted before Phase 2 existed (otherwise they show as null/undefined
+        // in the dashboard).
+        const rollups = parsed.rollups ?? {};
+        for (const day of Object.keys(rollups)) {
+          const r = rollups[day];
+          if (r.truncationTokensSaved === undefined) r.truncationTokensSaved = 0;
+          if (r.compactionTokensSaved === undefined) r.compactionTokensSaved = 0;
+          if (r.redundantCallsAvoided === undefined) r.redundantCallsAvoided = 0;
+          if (r.snapshotTasks === undefined) r.snapshotTasks = 0;
+          if (r.autoRoutedTasks === undefined) r.autoRoutedTasks = 0;
+          if (r.escalations === undefined) r.escalations = 0;
+          if (r.escalationSuccesses === undefined) r.escalationSuccesses = 0;
+        }
+        // Phase 4: backfill outcome on recent tasks
+        for (const t of parsed.recentTasks) {
+          if (!t.outcome) t.outcome = t.status === "success" ? "silent" : "rejected";
+        }
         this.data = {
           version: 1,
           recentTasks: parsed.recentTasks ?? [],
           recentRequests: parsed.recentRequests ?? [],
-          rollups: parsed.rollups ?? {},
+          rollups,
         };
       }
     } catch {
@@ -181,6 +225,15 @@ export class TelemetryStore {
       rawContextTokens: 0,
       actualContextTokens: 0,
       prunedMessages: 0,
+      truncationTokensSaved: 0,
+      compactionTokensSaved: 0,
+      redundantCallsAvoided: 0,
+      snapshotInjected: false,
+      routedBy: "manual",
+      category: null,
+      escalations: 0,
+      outcome: "silent",
+      testResults: [],
       lastIterationHadError: false,
       anyToolSuccess: false,
     };
@@ -337,6 +390,14 @@ export class TelemetryStore {
       rawContextTokens: task.rawContextTokens,
       actualContextTokens: task.actualContextTokens,
       prunedMessages: task.prunedMessages,
+      truncationTokensSaved: task.truncationTokensSaved,
+      compactionTokensSaved: task.compactionTokensSaved,
+      redundantCallsAvoided: task.redundantCallsAvoided,
+      snapshotInjected: task.snapshotInjected,
+      routedBy: task.routedBy,
+      category: task.category,
+      escalations: task.escalations,
+      outcome: task.outcome,
     };
     this.active.delete(task.taskId);
     this.data.recentTasks.unshift(rec);
@@ -353,6 +414,13 @@ export class TelemetryStore {
     rollup.cacheHits += rec.cacheHits;
     rollup.filesRead += rec.filesRead;
     rollup.filesModified += rec.filesModified;
+    rollup.truncationTokensSaved += rec.truncationTokensSaved;
+    rollup.compactionTokensSaved += rec.compactionTokensSaved;
+    rollup.redundantCallsAvoided += rec.redundantCallsAvoided;
+    if (rec.snapshotInjected) rollup.snapshotTasks++;
+    if (rec.routedBy === "auto") rollup.autoRoutedTasks++;
+    rollup.escalations += rec.escalations;
+    if (rec.escalations > 0 && status === "success") rollup.escalationSuccesses++;
     rollup.totalTaskDurationMs += rec.durationMs;
 
     const ms = rollup.perModel[task.model] ?? emptyModelStats(task.model);
@@ -362,6 +430,31 @@ export class TelemetryStore {
 
     this.scheduleWrite();
     return rec;
+  }
+
+  /**
+   * Phase 4: Relabel a task's outcome. Never downgrades verified/accepted.
+   * Updates the TaskRecord in recentTasks and re-records into learned stats.
+   */
+  relabelOutcome(taskId: string, outcome: string): TaskRecord | null {
+    const rec = this.data.recentTasks.find((t) => t.taskId === taskId);
+    if (!rec) return null;
+    const current = rec.outcome as Outcome;
+    const proposed = outcome as Outcome;
+    if (!isUpgrade(current, proposed)) return rec;
+    rec.outcome = outcome;
+    this.scheduleWrite();
+    return rec;
+  }
+
+  /** Phase 4: Get a task record by id (from recent tasks). */
+  getTask(taskId: string): TaskRecord | null {
+    return this.data.recentTasks.find((t) => t.taskId === taskId) ?? null;
+  }
+
+  /** Phase 4: Get the last completed task in a session (for correction detection). */
+  getLastTaskInSession(sessionId: string): TaskRecord | null {
+    return this.data.recentTasks.find((t) => t.sessionId === sessionId) ?? null;
   }
 
   private rollupFor(day: string): DailyRollup {
@@ -410,6 +503,21 @@ export class TelemetryStore {
       avgTaskDurationMs,
       contextSavingsPct,
       cacheHitRate,
+      reduction: {
+        truncationTokensSaved: todayRollup.truncationTokensSaved ?? 0,
+        compactionTokensSaved: todayRollup.compactionTokensSaved ?? 0,
+        redundantCallsAvoided: todayRollup.redundantCallsAvoided ?? 0,
+        snapshotTasks: todayRollup.snapshotTasks ?? 0,
+      },
+      optimize: {
+        autoRoutedTasks: todayRollup.autoRoutedTasks ?? 0,
+        escalations: todayRollup.escalations ?? 0,
+        escalationSuccesses: todayRollup.escalationSuccesses ?? 0,
+        escalationRate: todayRollup.tasks > 0 ? (todayRollup.escalations ?? 0) / todayRollup.tasks : 0,
+        escalationSuccessRate: (todayRollup.escalations ?? 0) > 0
+          ? (todayRollup.escalationSuccesses ?? 0) / (todayRollup.escalations ?? 0)
+          : 0,
+      },
       trend,
       recentTasks: this.data.recentTasks.slice(0, 25),
     };

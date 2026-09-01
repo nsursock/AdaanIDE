@@ -5,6 +5,7 @@ import { AgentEngine } from "./agent/engine.js";
 import { defaultRegistry } from "./agent/tools/registry.js";
 import { sessionStore, AgentSession } from "./agent/session.js";
 import { getWatcher } from "./watcher.js";
+import { modelRegistry } from "./registry/index.js";
 import type { AgentEvent, ModelGroups } from "../types.js";
 
 /**
@@ -19,6 +20,7 @@ export function initProvider(apiKey: string) {
   // Defer the error to when the provider is actually used.
   provider = new OpenRouterProvider({ apiKey: apiKey || "" });
   engine = new AgentEngine({ provider, registry: defaultRegistry });
+  modelRegistry.setProvider(provider);
 }
 
 /**
@@ -33,6 +35,7 @@ export function updateProviderKey(apiKey: string) {
   }
   provider = new OpenRouterProvider({ apiKey: apiKey || "" });
   engine = new AgentEngine({ provider, registry: defaultRegistry });
+  modelRegistry.setProvider(provider);
 }
 
 export function getProvider(): OpenRouterProvider {
@@ -79,23 +82,51 @@ export { sessionStore, AgentSession, Workspace, getWatcher, DEFAULT_FREE_POOL };
  */
 export function createSSEStream(eventIterable: AsyncIterable<AgentEvent>): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
+  let cancelled = false;
   return new ReadableStream({
     async start(controller) {
       try {
         for await (const event of eventIterable) {
+          if (cancelled) break;
           const data = `data: ${JSON.stringify(event)}\n\n`;
-          controller.enqueue(encoder.encode(data));
+          // Guard enqueue — if the client disconnected, the controller
+          // may be in an errored state. Swallow the TypeError instead of
+          // crashing the server-side generator consumption loop.
+          try {
+            controller.enqueue(encoder.encode(data));
+          } catch {
+            cancelled = true;
+            break;
+          }
         }
       } catch (e) {
-        const errorEvent: AgentEvent = {
-          type: "error",
-          sessionId: "",
-          data: { message: e instanceof Error ? e.message : "Stream error" },
-          timestamp: Date.now(),
-        };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
+        if (cancelled) {
+          // Client disconnected — don't emit an error event into a dead
+          // stream; just close.
+        } else {
+          const errorEvent: AgentEvent = {
+            type: "error",
+            sessionId: "",
+            data: { message: e instanceof Error ? e.message : "Stream error" },
+            timestamp: Date.now(),
+          };
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
+          } catch {
+            // controller already errored — nothing we can do
+          }
+        }
       } finally {
-        controller.close();
+        try { controller.close(); } catch { /* already closed */ }
+      }
+    },
+    cancel() {
+      // Client disconnected — stop consuming the iterable. Calling
+      // return() on the async generator triggers its finally block so
+      // the engine can finalize the task as cancelled.
+      cancelled = true;
+      if (typeof (eventIterable as any).return === "function") {
+        (eventIterable as any).return().catch(() => {});
       }
     },
   });

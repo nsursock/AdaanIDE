@@ -20,6 +20,16 @@ const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const STREAM_IDLE_TIMEOUT_MS = 45_000;
 
 /**
+ * Hard per-attempt deadline. Even if the idle timer is defeated by partial
+ * data: lines or keep-alive comments, no single request to a model may run
+ * longer than this. When it fires, the request is aborted and surfaced as
+ * a retryable 503 so the caller can fail over. Without this, a stalled
+ * stream that keeps the TCP connection alive but never delivers a complete
+ * SSE line hangs the agent loop indefinitely.
+ */
+const STREAM_HARD_DEADLINE_MS = 180_000; // 3 minutes
+
+/**
  * Default free model pool for rotation.
  * These are free, tool-capable models on OpenRouter, sourced from the live
  * /models catalog. The free-tier lineup churns often — the live catalog is
@@ -302,6 +312,7 @@ export class OpenRouterProvider implements LLMProvider {
     const internalController = new AbortController();
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
+    let hardDeadlineHit = false;
     const armIdleTimer = () => {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
@@ -309,6 +320,14 @@ export class OpenRouterProvider implements LLMProvider {
         internalController.abort();
       }, this.idleTimeoutMs);
     };
+    // Hard per-attempt deadline — fires regardless of idle signals. A
+    // stalled stream that keeps re-arming the idle timer with partial data:
+    // lines or keep-alive comments will still be killed at this point.
+    const requestStart = Date.now();
+    const hardDeadlineTimer = setTimeout(() => {
+      hardDeadlineHit = true;
+      internalController.abort();
+    }, STREAM_HARD_DEADLINE_MS);
     const onUserAbort = () => internalController.abort();
     if (options.signal) {
       if (options.signal.aborted) internalController.abort();
@@ -316,6 +335,7 @@ export class OpenRouterProvider implements LLMProvider {
     }
     const cleanupTimer = () => {
       if (idleTimer) clearTimeout(idleTimer);
+      clearTimeout(hardDeadlineTimer);
       options.signal?.removeEventListener("abort", onUserAbort);
     };
 
@@ -336,6 +356,11 @@ export class OpenRouterProvider implements LLMProvider {
       });
     } catch (e: any) {
       cleanupTimer();
+      if (hardDeadlineHit) {
+        const err = new Error(`Model ${options.model} exceeded hard deadline (${STREAM_HARD_DEADLINE_MS}ms) — failing over`);
+        (err as any).statusCode = 503;
+        throw err;
+      }
       if (timedOut) {
         const err = new Error(`Request to ${options.model} timed out waiting for a response (>${this.idleTimeoutMs}ms)`);
         (err as any).statusCode = 503;
@@ -389,6 +414,11 @@ export class OpenRouterProvider implements LLMProvider {
         try {
           ({ done, value } = await reader.read());
         } catch (e: any) {
+          if (hardDeadlineHit) {
+            const err = new Error(`Model ${options.model} exceeded hard deadline (${STREAM_HARD_DEADLINE_MS}ms) — failing over`);
+            (err as any).statusCode = 503;
+            throw err;
+          }
           if (timedOut) {
             const err = new Error(`Model ${options.model} stopped streaming (idle >${this.idleTimeoutMs}ms) — failing over`);
             (err as any).statusCode = 503;
@@ -402,15 +432,30 @@ export class OpenRouterProvider implements LLMProvider {
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
 
-        // Only real data counts as progress. OpenRouter sends keep-alive
-        // comment lines (": OPENROUTER PROCESSING") while a model is queued;
-        // those must NOT reset the idle clock or a stalled request hangs
-        // forever. A partial "data:" line still in the buffer also counts.
-        let madeProgress = buffer.startsWith("data:");
+        // Only COMPLETE data: lines count as progress. A partial "data:"
+        // line stuck in the buffer (server stalled mid-chunk while
+        // keep-alives keep the TCP connection alive) must NOT re-arm the
+        // idle clock — otherwise a stalled stream hangs forever.
+        // OpenRouter sends keep-alive comment lines (": OPENROUTER
+        // PROCESSING") while a model is queued; those also don't count.
+        let madeProgress = false;
 
         for (const line of lines) {
           if (!line.trim()) continue;
-          if (line.startsWith(":")) continue; // SSE comment / keep-alive
+          if (line.startsWith(":")) {
+            // SSE comment / keep-alive. OpenRouter sends
+            // ": OPENROUTER PROCESSING" while a model is queued at the
+            // provider — a genuine alive signal. Surface it so the engine
+            // can show "queued at provider" to the user. This does NOT
+            // re-arm the idle timer (see madeProgress below): a stalled
+            // stream that keeps emitting keep-alives must still be killed
+            // by the idle/hard-deadline timers. The hard deadline is the
+            // backstop for genuinely-queued-but-alive streams.
+            if (/OPENROUTER\s+PROCESSING/i.test(line)) {
+              yield { type: "provider.queued", data: {} };
+            }
+            continue;
+          }
           if (!line.startsWith("data: ")) continue;
           madeProgress = true;
 
@@ -432,6 +477,18 @@ export class OpenRouterProvider implements LLMProvider {
             // Handle text content
             if (delta?.content) {
               yield { type: "text.delta", data: { text: delta.content } };
+            }
+
+            // Handle reasoning/thinking content. OpenRouter streams this
+            // via `delta.reasoning` (their native field) or
+            // `delta.reasoning_content` (OpenAI/DeepSeek-compatible). Read
+            // both — `reasoning_content` wins when both are present (matches
+            // the OpenAI Chat delta convention). Only reasoning-capable
+            // models emit these; non-reasoning models never set either, so
+            // this is a no-op for them.
+            const reasoningText = delta?.reasoning_content ?? delta?.reasoning;
+            if (reasoningText) {
+              yield { type: "reasoning.delta", data: { text: reasoningText } };
             }
 
             // Handle tool calls (streaming accumulation)

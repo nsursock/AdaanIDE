@@ -271,3 +271,40 @@ describe("TelemetryStore — task lifecycle", () => {
     assert.equal(t.successfulTasks, 0);
   });
 });
+
+describe("TelemetryStore — Phase 2 reduction fields", () => {
+  it("rolls up truncation, compaction, redundant calls, and snapshot", () => {
+    const { store } = freshStore();
+    const task = store.startTask("s1", "m:free", "reduce me");
+    task.truncationTokensSaved = 5000;
+    task.compactionTokensSaved = 3000;
+    task.redundantCallsAvoided = 2;
+    task.snapshotInjected = true;
+    recordOne(store, task);
+    store.finishTask(task, "success");
+
+    const summary = store.getSummary();
+    assert.equal(summary.today.truncationTokensSaved, 5000);
+    assert.equal(summary.today.compactionTokensSaved, 3000);
+    assert.equal(summary.today.redundantCallsAvoided, 2);
+    assert.equal(summary.today.snapshotTasks, 1);
+
+    // Reduction block in summary.
+    assert.equal(summary.reduction.truncationTokensSaved, 5000);
+    assert.equal(summary.reduction.compactionTokensSaved, 3000);
+    assert.equal(summary.reduction.redundantCallsAvoided, 2);
+    assert.equal(summary.reduction.snapshotTasks, 1);
+  });
+
+  it("defaults to zero when no reduction happened", () => {
+    const { store } = freshStore();
+    const task = store.startTask("s1", "m:free", "plain task");
+    recordOne(store, task);
+    store.finishTask(task, "success");
+    const summary = store.getSummary();
+    assert.equal(summary.reduction.truncationTokensSaved, 0);
+    assert.equal(summary.reduction.compactionTokensSaved, 0);
+    assert.equal(summary.reduction.redundantCallsAvoided, 0);
+    assert.equal(summary.reduction.snapshotTasks, 0);
+  });
+});

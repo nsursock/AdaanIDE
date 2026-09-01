@@ -161,6 +161,151 @@ describe("OpenRouterProvider — SSE streaming", () => {
     assert.ok(elapsed < 5000, `should time out quickly, took ${elapsed}ms`);
   });
 
+  it("surfaces OPENROUTER PROCESSING keep-alives as provider.queued events", async () => {
+    handler = (_req, res) => {
+      // Model is queued at the provider — keep-alives arrive, then the real
+      // stream starts. The keep-alives must be surfaced (not silently
+      // discarded) so the engine can show "queued at provider" to the user.
+      sse(res, [
+        ": OPENROUTER PROCESSING\n\n",
+        ": OPENROUTER PROCESSING\n\n",
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "hello" } }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ]);
+      setTimeout(() => res.end(), 50);
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl, freePool: [] });
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "queued/model:free", tools: [] }),
+    );
+
+    const queued = events.filter((e) => e.type === "provider.queued");
+    assert.ok(queued.length >= 2, `expected >=2 provider.queued events, got ${queued.length}`);
+    // They must arrive before the first text.delta.
+    const firstText = events.findIndex((e) => e.type === "text.delta");
+    assert.ok(firstText > 0, "expected a text.delta event");
+    const lastQueuedBeforeText = (() => {
+      let idx = -1;
+      for (let i = 0; i < firstText; i++) if (events[i].type === "provider.queued") idx = i;
+      return idx;
+    })();
+    assert.ok(lastQueuedBeforeText >= 0 && lastQueuedBeforeText < firstText);
+    // The real stream still completes.
+    assert.ok(events.some((e) => e.type === "finish"));
+  });
+
+  it("does not emit provider.queued for non-PROCESSING SSE comments", async () => {
+    handler = (_req, res) => {
+      // A generic SSE comment (not an OpenRouter PROCESSING keep-alive).
+      sse(res, [
+        ": some other comment\n\n",
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "ok" } }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ]);
+      setTimeout(() => res.end(), 50);
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl, freePool: [] });
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "comment/model:free", tools: [] }),
+    );
+    assert.equal(events.filter((e) => e.type === "provider.queued").length, 0);
+  });
+
+  it("streams reasoning.delta from delta.reasoning (OpenRouter native field)", async () => {
+    handler = (_req, res) => {
+      sse(res, [
+        `data: ${JSON.stringify({ choices: [{ delta: { reasoning: "Let me think" } }] })}\n\n`,
+        `data: ${JSON.stringify({ choices: [{ delta: { reasoning: " about this" } }] })}\n\n`,
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "The answer is 7" } }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ]);
+      setTimeout(() => res.end(), 50);
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl, freePool: [] });
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "reasoning/model:free", tools: [] }),
+    );
+
+    const reasoning = events.filter((e) => e.type === "reasoning.delta");
+    assert.equal(reasoning.length, 2, "expected 2 reasoning.delta events");
+    const combined = reasoning.map((e) => (e.data as { text: string }).text).join("");
+    assert.equal(combined, "Let me think about this");
+    // Reasoning must arrive before the text content.
+    const firstText = events.findIndex((e) => e.type === "text.delta");
+    const lastReasoning = (() => {
+      let idx = -1;
+      for (let i = 0; i < firstText; i++) if (events[i].type === "reasoning.delta") idx = i;
+      return idx;
+    })();
+    assert.ok(lastReasoning >= 0 && lastReasoning < firstText);
+    assert.ok(events.some((e) => e.type === "finish"));
+  });
+
+  it("streams reasoning.delta from delta.reasoning_content (OpenAI/DeepSeek-compatible)", async () => {
+    handler = (_req, res) => {
+      sse(res, [
+        `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "Step 1" } }] })}\n\n`,
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "Done" } }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ]);
+      setTimeout(() => res.end(), 50);
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl, freePool: [] });
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "deepseek/model:free", tools: [] }),
+    );
+
+    const reasoning = events.filter((e) => e.type === "reasoning.delta");
+    assert.equal(reasoning.length, 1);
+    assert.equal((reasoning[0].data as { text: string }).text, "Step 1");
+  });
+
+  it("does not emit reasoning.delta for non-reasoning models", async () => {
+    handler = (_req, res) => {
+      sse(res, [
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "just text" } }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ]);
+      setTimeout(() => res.end(), 50);
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl, freePool: [] });
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "plain/model:free", tools: [] }),
+    );
+    assert.equal(events.filter((e) => e.type === "reasoning.delta").length, 0);
+  });
+
+  it("partial data: line in buffer does NOT reset idle timer (no infinite hang)", async () => {
+    // Simulates a server that stalls mid-chunk: it writes a partial
+    // "data:" line (no newline) and then keeps the connection alive
+    // with TCP keep-alives but never sends more data. The old heuristic
+    // (buffer.startsWith("data:")) would re-arm the idle timer on every
+    // read, hanging forever. The fix: only complete data: lines count.
+    handler = (_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      // Write a partial data: line — no trailing newline, never completed.
+      res.write("data: {\"choices\":[{\"delta\":{\"content\":\"hi");
+      // Never send the rest. Never send [DONE]. Never end.
+      // The connection stays open but no complete lines arrive.
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl, freePool: [], idleTimeoutMs: 300 });
+    const start = Date.now();
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "stalled/partial:free", tools: [] }),
+    );
+    const elapsed = Date.now() - start;
+
+    const last = events[events.length - 1];
+    assert.equal(last.type, "error", "partial-line stall must surface an error, not hang");
+    assert.ok(elapsed < 5000, `should time out quickly, took ${elapsed}ms`);
+  });
+
   it("retries the same model once on a transient 429 before failing over", async () => {
     seenModels.length = 0;
     let calls = 0;

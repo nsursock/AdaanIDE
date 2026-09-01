@@ -51,6 +51,16 @@ export interface Settings {
    * acceptable for a local-first IDE but not for a hosted multi-user app.
    */
   openrouterApiKey: string | null;
+  /** Phase 3: adaptive routing mode — "auto" routes by task complexity, "manual" keeps the user's pick. */
+  routingMode: "auto" | "manual";
+  /** Phase 3: minimum empirical task success rate to trust a model (0..1). */
+  routingThreshold: number;
+  /** Phase 3: which model tiers are allowed for auto-routing. */
+  routingTiers: ("free" | "mid" | "frontier")[];
+  /** Phase 4: whether learning-based routing is enabled (default on — only changes routing when data exists). */
+  learningEnabled: boolean;
+  /** Phase 4: whether exploration can spend paid requests (default off). */
+  explorationPaidEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -64,6 +74,11 @@ export const DEFAULT_SETTINGS: Settings = {
   selectedModelId: null,
   threeEnabled: true,
   openrouterApiKey: null,
+  routingMode: "manual",
+  routingThreshold: 0.6,
+  routingTiers: ["free", "mid", "frontier"],
+  learningEnabled: true,
+  explorationPaidEnabled: false,
 };
 
 function clamp(n: number, min: number, max: number): number {
@@ -125,6 +140,22 @@ export function migrateBlob(raw: unknown): Settings {
         : obj.openrouterApiKey === null
           ? null
           : DEFAULT_SETTINGS.openrouterApiKey,
+    routingMode:
+      obj.routingMode === "auto" || obj.routingMode === "manual"
+        ? obj.routingMode
+        : DEFAULT_SETTINGS.routingMode,
+    routingThreshold:
+      typeof obj.routingThreshold === "number"
+        ? obj.routingThreshold
+        : DEFAULT_SETTINGS.routingThreshold,
+    routingTiers:
+      Array.isArray(obj.routingTiers) && obj.routingTiers.length > 0
+        ? obj.routingTiers.filter((t: unknown) => t === "free" || t === "mid" || t === "frontier") as ("free" | "mid" | "frontier")[]
+        : DEFAULT_SETTINGS.routingTiers,
+    learningEnabled:
+      typeof obj.learningEnabled === "boolean" ? obj.learningEnabled : DEFAULT_SETTINGS.learningEnabled,
+    explorationPaidEnabled:
+      typeof obj.explorationPaidEnabled === "boolean" ? obj.explorationPaidEnabled : DEFAULT_SETTINGS.explorationPaidEnabled,
   };
 }
 

@@ -19,6 +19,7 @@ import {
   DEFAULT_SECURITY,
   type SecurityOptions,
 } from "./security.js";
+import { WorkspaceCache } from "./agent/workspace-cache.js";
 
 const execAsync = promisify(execCb);
 
@@ -39,6 +40,8 @@ export class Workspace {
   readonly security: SecurityOptions;
   /** Local version history — snapshots every file version for undo/restore. */
   readonly history: FileHistory;
+  /** C1: workspace-level L2 read cache — shared across sessions. */
+  readonly workspaceCache: WorkspaceCache;
 
   constructor(rootPath: string, opts?: Partial<SecurityOptions>) {
     // Resolve root path, following symlinks (e.g. /var -> /private/var on macOS)
@@ -47,6 +50,7 @@ export class Workspace {
     this.name = path.basename(this.rootPath);
     this.security = { ...DEFAULT_SECURITY, ...opts };
     this.history = new FileHistory(this.rootPath);
+    this.workspaceCache = new WorkspaceCache();
   }
 
   // --- Path resolution -------------------------------------------------------
@@ -191,7 +195,7 @@ export class Workspace {
     input: string,
     content: string,
     expectedHash?: string,
-  ): Promise<{ hash: string; path: string; previousContent?: string }> {
+  ): Promise<{ hash: string; path: string; previousContent?: string; lines: number }> {
     const abs = this.resolve(input);
     let previousContent: string | undefined;
 
@@ -235,7 +239,10 @@ export class Workspace {
       await this.history.snapshot(input, previousContent, "user", "write_file");
     }
     await fs.writeFile(abs, content, "utf-8");
-    return { hash: sha256(content), path: this.relative(abs), previousContent };
+    // C1: invalidate L2 cache for this path + tree (file may have been created).
+    this.workspaceCache.invalidatePath(this.relative(abs));
+    this.workspaceCache.invalidateTree();
+    return { hash: sha256(content), path: this.relative(abs), previousContent, lines: content.split("\n").length };
   }
 
   // --- Patch (diff-match-patch) ----------------------------------------------
@@ -244,7 +251,16 @@ export class Workspace {
     input: string,
     patch: string,
     expectedHash: string,
-  ): Promise<{ hash: string; path: string; applied: boolean; previousContent: string }> {
+  ): Promise<{
+    hash: string;
+    path: string;
+    applied: boolean;
+    previousContent: string;
+    blocksApplied: number;
+    linesAdded: number;
+    linesDeleted: number;
+    snippet: string;
+  }> {
     const abs = this.resolve(input);
     const existing = await fs.readFile(abs, "utf-8").catch(() => {
       throw new Error(`File not found for patching: ${input}`);
@@ -276,15 +292,42 @@ export class Workspace {
       );
     }
 
+    // B2: compute diff stats + snippet so the model doesn't need a follow-up
+    // read_file to verify the patch landed.
+    const oldLines = existing.split("\n");
+    const newLines = result.content.split("\n");
+    const linesAdded = Math.max(0, newLines.length - oldLines.length);
+    const linesDeleted = Math.max(0, oldLines.length - newLines.length);
+    // Find the first changed line for the snippet.
+    let firstChange = 0;
+    while (firstChange < oldLines.length && firstChange < newLines.length && oldLines[firstChange] === newLines[firstChange]) {
+      firstChange++;
+    }
+    const snippetStart = Math.max(0, firstChange - 3);
+    const snippetEnd = Math.min(newLines.length, firstChange + 37);
+    const snippet = newLines.slice(snippetStart, snippetEnd).join("\n");
+
     // Snapshot the pre-patch version for local history (undo/restore).
     await this.history.snapshot(input, existing, "agent", "apply_patch");
     await fs.writeFile(abs, result.content, "utf-8");
-    return { hash: sha256(result.content), path: this.relative(abs), applied: true, previousContent: existing };
+    // C1: invalidate L2 cache for this path + tree.
+    this.workspaceCache.invalidatePath(this.relative(abs));
+    this.workspaceCache.invalidateTree();
+    return {
+      hash: sha256(result.content),
+      path: this.relative(abs),
+      applied: true,
+      previousContent: existing,
+      blocksApplied: result.blocksApplied ?? 0,
+      linesAdded,
+      linesDeleted,
+      snippet,
+    };
   }
 
   // --- Create ----------------------------------------------------------------
 
-  async createFile(input: string, content = ""): Promise<{ path: string; hash: string }> {
+  async createFile(input: string, content = ""): Promise<{ path: string; hash: string; lines: number }> {
     const abs = this.resolve(input);
     try {
       await fs.stat(abs);
@@ -296,7 +339,9 @@ export class Workspace {
     }
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, content, "utf-8");
-    return { path: this.relative(abs), hash: sha256(content) };
+    // C1: invalidate L2 tree (new file may show up in list_files).
+    this.workspaceCache.invalidateTree();
+    return { path: this.relative(abs), hash: sha256(content), lines: content.split("\n").length };
   }
 
   async createDir(input: string): Promise<{ path: string }> {
@@ -312,6 +357,9 @@ export class Workspace {
     await fs.rm(abs, { recursive: false }).catch(() => {
       throw new Error(`Cannot delete: ${input}`);
     });
+    // C1: invalidate L2 cache for this path + tree.
+    this.workspaceCache.invalidatePath(this.relative(abs));
+    this.workspaceCache.invalidateTree();
     return { path: this.relative(abs) };
   }
 
@@ -647,6 +695,7 @@ interface PatchResult {
   success: boolean;
   content: string;
   error?: string;
+  blocksApplied?: number;
 }
 
 /**
@@ -754,7 +803,7 @@ function applySimplePatch(original: string, patch: string): PatchResult {
     };
   }
 
-  return { success: true, content };
+  return { success: true, content, blocksApplied };
 }
 
 /**

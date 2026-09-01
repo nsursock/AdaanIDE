@@ -82,6 +82,22 @@ export interface TaskRecord {
   actualContextTokens: number;
   /** Number of messages pruned across all requests in this task. */
   prunedMessages: number;
+  /** Tokens saved by truncating large tool results before history (A1). */
+  truncationTokensSaved: number;
+  /** Tokens saved by compacting old tool messages during pruning (A2). */
+  compactionTokensSaved: number;
+  /** Number of redundant tool calls blocked by the repeat-failure guard (B1). */
+  redundantCallsAvoided: number;
+  /** Whether a workspace snapshot was injected on this task's first request (A3). */
+  snapshotInjected: boolean;
+  /** Phase 3: whether this task was routed by the adaptive router or manually. */
+  routedBy: "auto" | "manual";
+  /** Phase 3: task category from the classifier. */
+  category: string | null;
+  /** Phase 3: number of intra-task escalations. */
+  escalations: number;
+  /** Phase 4: implicit outcome signal (verified/accepted/silent/corrected/rejected/rolled_back). */
+  outcome: string;
 }
 
 /** Per-model empirical stats for a single day — the capability-matrix seed. */
@@ -126,6 +142,20 @@ export interface DailyRollup {
   actualContextTokens: number;
   /** Total messages pruned across all requests. */
   prunedMessages: number;
+  /** Tokens saved by truncating large tool results (A1), rolled up across tasks. */
+  truncationTokensSaved: number;
+  /** Tokens saved by compacting old tool messages during pruning (A2). */
+  compactionTokensSaved: number;
+  /** Redundant tool calls blocked by the repeat-failure guard (B1). */
+  redundantCallsAvoided: number;
+  /** Tasks that had a workspace snapshot injected on their first request (A3). */
+  snapshotTasks: number;
+  /** Phase 3: tasks that were routed by the adaptive router. */
+  autoRoutedTasks: number;
+  /** Phase 3: total intra-task escalations. */
+  escalations: number;
+  /** Phase 3: tasks that succeeded after ≥1 escalation. */
+  escalationSuccesses: number;
   /** Total task duration in ms. */
   totalTaskDurationMs: number;
   perModel: Record<string, ModelDailyStats>;
@@ -160,6 +190,21 @@ export interface TelemetrySummary {
   contextSavingsPct: number;
   /** cache-hit rate: cacheHits / (cacheHits + toolCalls) today (0..1). */
   cacheHitRate: number;
+  /** Phase 2 reduction metrics for today. */
+  reduction: {
+    truncationTokensSaved: number;
+    compactionTokensSaved: number;
+    redundantCallsAvoided: number;
+    snapshotTasks: number;
+  };
+  /** Phase 3 optimization metrics for today. */
+  optimize: {
+    autoRoutedTasks: number;
+    escalations: number;
+    escalationSuccesses: number;
+    escalationRate: number;
+    escalationSuccessRate: number;
+  };
   /** 14-day trend (oldest → newest), each entry a DailyRollup. */
   trend: DailyRollup[];
   /** Recent tasks (most-recent first), capped. */

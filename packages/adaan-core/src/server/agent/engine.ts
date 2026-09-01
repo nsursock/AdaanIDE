@@ -11,12 +11,28 @@ import type {
 import type { LLMProvider } from "./provider.js";
 import type { ToolRegistry } from "./tools/registry.js";
 import type { AgentSession } from "./session.js";
-import { estimateTotalTokens, pruneMessages } from "./context.js";
+import { estimateTotalTokens, pruneContext, truncateToolContent } from "./context.js";
+import { buildWorkspaceSnapshot } from "./snapshot.js";
+import { L2_CACHEABLE_TOOLS } from "./workspace-cache.js";
+import { classifyTask, routeModel, DEFAULT_ROUTER_SETTINGS, type RouterSettings } from "../router/index.js";
+import { modelRegistry } from "../registry/index.js";
+import { isCorrectionMessage, detectOutcome, OUTCOME_WEIGHTS } from "../learn/outcome.js";
+import { learnedStats, routeWithLearning, seededRng } from "../learn/index.js";
 import { telemetryStore, type ActiveTask } from "../telemetry/index.js";
 import type { RequestType } from "../telemetry/types.js";
 import type { TaskSummaryData } from "../../types.js";
 
 const MAX_ITERATIONS = 10;
+/** Max consecutive read-only (exploration) iterations before a plan-or-act nudge. */
+const MAX_EXPLORATION_ITERATIONS = 3;
+/** Read-only / non-productive tools that count as "exploration" for the cap.
+ *  Includes execute_command and run_tests because a model that spends all
+ *  iterations running version checks and launch tests without writing any
+ *  files is effectively exploring, not implementing. */
+const READ_ONLY_TOOLS = new Set([
+  "read_file", "list_files", "list_symbols", "search_files", "git_status", "git_diff",
+  "execute_command", "run_tests",
+]);
 const SYSTEM_PROMPT = `You are AdaanIDE, an autonomous coding agent integrated into a development IDE.
 You can read, write, search, and execute commands in the user's workspace.
 
@@ -64,8 +80,12 @@ export interface EngineOptions {
 export class AgentEngine {
   private provider: LLMProvider;
   private registry: ToolRegistry;
-  private maxIterations: number;
+  maxIterations: number;
   private systemPrompt: string;
+  /** Phase 3: adaptive router settings. */
+  routerSettings: RouterSettings = DEFAULT_ROUTER_SETTINGS;
+  /** Phase 4: whether paid-model exploration is allowed (default off). */
+  explorationPaidEnabled = false;
 
   constructor(opts: EngineOptions) {
     this.provider = opts.provider;
@@ -97,17 +117,108 @@ export class AgentEngine {
 
     // Add user message to session (works for both new sessions and follow-ups)
     session.resume();
+
+    // Clean up orphaned assistant messages from an abandoned previous turn.
+    // If the previous run() was interrupted mid-tool-execution, the session
+    // may end with an assistant message containing tool_calls but no
+    // corresponding tool-result messages. Sending that malformed sequence
+    // to the provider causes empty responses or rejections on the next turn.
+    this.cleanupOrphanedToolCalls(session);
+
+    // This is the active turn now — clear the superseded flag that
+    // resume() may have set to signal the previous generator to exit.
+    session.superseded = false;
+
     session.messages.push({ role: "user", content: userMessage });
 
     // --- Telemetry: begin tracking this user task ---------------------------
     await telemetryStore.load();
+
+    // Phase 4: detect correction of the previous task in this session.
+    // If the previous task ended < 5 min ago and this message matches a
+    // correction pattern, relabel the previous task's outcome to "corrected".
+    const prevTask = telemetryStore.getLastTaskInSession(session.id);
+    if (prevTask && prevTask.status === "success") {
+      const elapsed = Date.now() - (prevTask.timestamp + prevTask.durationMs);
+      if (elapsed < 5 * 60_000 && isCorrectionMessage(userMessage)) {
+        telemetryStore.relabelOutcome(prevTask.taskId, "corrected");
+      }
+    }
+
     const task = telemetryStore.startTask(session.id, model, userMessage);
     let taskStatus: "success" | "error" | "cancelled" = "success";
     let taskFinalized = false;
+
+    // --- Phase 3: adaptive routing — if model is "auto", classify the task
+    // and route to the cheapest model likely to succeed. 100% local. ---
+    let routedBy: "auto" | "manual" = "manual";
+    if (model === "auto") {
+      try {
+        await modelRegistry.load();
+        await modelRegistry.refresh();
+        await learnedStats.load();
+        const cls = classifyTask(userMessage);
+        // Phase 4: try learned policy first (Thompson sampling), fall back
+        // to Phase 3's threshold rule when samples < 3.
+        let route = routeWithLearning(
+          cls, modelRegistry, this.routerSettings, learnedStats,
+          seededRng(Date.now() & 0xffffffff),
+          { explorationPaidEnabled: this.explorationPaidEnabled },
+        );
+        if (!route) {
+          route = routeModel(cls, modelRegistry, this.routerSettings);
+        }
+        if (route) {
+          model = route.model;
+          routedBy = "auto";
+          task.routedBy = "auto";
+          task.category = route.category;
+          yield emit("model.routed", {
+            model: route.model,
+            category: route.category,
+            reason: route.reason,
+            classification: {
+              complexity: route.classification.complexity,
+              coding: route.classification.coding,
+              reasoning: route.classification.reasoning,
+            },
+          });
+        } else {
+          // Router returned null (manual mode or no models) — fall back to
+          // the provider's default model selection.
+          model = (this.provider as any).pickModel?.() ?? model;
+        }
+      } catch {
+        // Routing is best-effort — don't fail the task if it errors.
+        model = (this.provider as any).pickModel?.() ?? model;
+      }
+    }
     const finalizeTask = (): TaskSummaryData => {
       if (taskFinalized) return {} as TaskSummaryData;
       taskFinalized = true;
+
+      // Phase 4: detect outcome from test results.
+      if (taskStatus === "success" && task.testResults.length > 0) {
+        const outcome = detectOutcome(task.testResults);
+        task.outcome = outcome;
+      }
+
       const rec = telemetryStore.finishTask(task, taskStatus);
+
+      // Phase 4: record into learned model stats.
+      if (rec.category && rec.status === "success") {
+        try {
+          learnedStats.record(
+            rec.category,
+            rec.model,
+            OUTCOME_WEIGHTS[rec.outcome as keyof typeof OUTCOME_WEIGHTS] ?? 0.7,
+            rec.day,
+          );
+        } catch {
+          // best-effort learning
+        }
+      }
+
       return {
         requestCount: rec.requestCount,
         toolCalls: rec.toolCalls,
@@ -117,13 +228,29 @@ export class AgentEngine {
         cost: rec.cost,
         durationMs: rec.durationMs,
         status: rec.status,
+        truncationTokensSaved: rec.truncationTokensSaved,
+        compactionTokensSaved: rec.compactionTokensSaved,
+        redundantCallsAvoided: rec.redundantCallsAvoided,
+        routedBy: rec.routedBy,
+        category: rec.category,
+        escalations: rec.escalations,
       };
     };
 
     try {
       let iteration = 0;
+      let consecutiveErrors = 0;  // Phase 3: escalation trigger
+      let consecutiveReadonlyIters = 0;  // exploration cap
 
       while (iteration < this.maxIterations) {
+        // If a new turn superseded this one (session.resume() was called
+        // by another engine.run() invocation), exit silently — the new
+        // generator owns the session now. Emitting cancelled/error here
+        // would clobber the new turn's UI.
+        if (session.superseded) {
+          finalizeTask();
+          return;
+        }
         if (session.isCancelled()) {
           yield emit("cancelled");
           return;
@@ -132,13 +259,35 @@ export class AgentEngine {
         // Build provider messages from session
         let providerMessages = this.buildProviderMessages(session);
 
-        // Prune if approaching context limit
+        // A3: inject a workspace snapshot on the first request of the session
+        // (when no assistant message has been sent yet). This kills the common
+        // "exploration" request where the model calls list_files just to orient.
+        const hasAssistantMsg = session.messages.some((m) => m.role === "assistant");
+        if (!hasAssistantMsg && !task.snapshotInjected) {
+          try {
+            const snapshot = await buildWorkspaceSnapshot(workspace);
+            if (snapshot) {
+              providerMessages.splice(1, 0, {
+                role: "system",
+                content: `Workspace snapshot (do not call list_files if this already answers your question):\n${snapshot}`,
+              });
+              task.snapshotInjected = true;
+            }
+          } catch {
+            // snapshot is best-effort — don't fail the request if it errors
+          }
+        }
+
+        // Prune if approaching context limit (A2: turn-aware + compaction)
         const rawContextTokens = estimateTotalTokens(providerMessages);
         let prunedThisIteration = 0;
         if (rawContextTokens > contextLength - 2000) {
-          const { messages: pruned, prunedCount } = pruneMessages(providerMessages, contextLength);
+          const { messages: pruned, prunedCount, compactedTokensSaved } = pruneContext(providerMessages, contextLength);
           providerMessages = pruned;
           prunedThisIteration = prunedCount;
+          if (compactedTokensSaved > 0) {
+            task.compactionTokensSaved += compactedTokensSaved;
+          }
           if (prunedCount > 0) {
             yield emit("context.pruned", { prunedCount, remainingTokens: contextLength - estimateTotalTokens(pruned) });
           }
@@ -154,6 +303,7 @@ export class AgentEngine {
 
         // Call provider
         let assistantContent = "";
+        let assistantReasoning = "";
         let assistantToolCalls: ToolCall[] = [];
         let finishReason: string = "stop";
         let modelUsed = model;
@@ -167,33 +317,96 @@ export class AgentEngine {
 
         const toolCallArgs: Map<number, { id: string; name: string; args: string }> = new Map();
 
+        // Synthetic progress: tell the UI which iteration/model we're about
+        // to request. Cleared on the first real token (see text.delta below).
+        const iterationLabel = iteration + 1;
+        yield emit("status", {
+          message: `iteration ${iterationLabel} → requesting ${model}…`,
+          iteration: iterationLabel,
+          model,
+        });
+        let streamingStarted = false;
+
         try {
-          for await (const event of this.provider.chat(providerMessages, {
-            model,
-            tools,
-            signal: session.abortController.signal,
-          })) {
-            switch (event.type) {
+          const providerStream = withHeartbeat(
+            this.provider.chat(providerMessages, {
+              model,
+              tools,
+              signal: session.abortController.signal,
+            }),
+            HEARTBEAT_INTERVAL_MS,
+            session.abortController.signal,
+          );
+          for await (const event of providerStream) {
+            // Heartbeat marker — the provider is silent. Surface it as a
+            // progress event so the UI can show "Working… Ns".
+            if (event && (event as Heartbeat).__heartbeat) {
+              const hb = event as Heartbeat;
+              if (session.superseded) {
+                finalizeTask();
+                return;
+              }
+              if (session.isCancelled()) {
+                taskStatus = "cancelled";
+                yield emit("cancelled");
+                yield emit("task.summary", finalizeTask());
+                return;
+              }
+              yield emit("progress", {
+                elapsedMs: hb.elapsedMs,
+                phase: streamingStarted ? "streaming" : "requesting",
+              });
+              continue;
+            }
+            const ev = event as ProviderEvent;
+            switch (ev.type) {
+              case "provider.queued": {
+                // OpenRouter keep-alive — the model is queued at the
+                // provider. A genuine alive signal, distinct from a stall.
+                yield emit("progress", {
+                  elapsedMs: Date.now() - requestStart,
+                  phase: "queued",
+                });
+                break;
+              }
               case "text.delta": {
-                const data = event.data as { text: string };
+                const data = ev.data as { text: string };
                 assistantContent += data.text;
+                if (!streamingStarted) {
+                  streamingStarted = true;
+                  // First real token — clear the "waiting" status line.
+                  yield emit("status", { message: "", iteration: iterationLabel, model });
+                }
                 yield emit("text.delta", { text: data.text });
                 break;
               }
+              case "reasoning.delta": {
+                const data = ev.data as { text: string };
+                assistantReasoning += data.text;
+                if (!streamingStarted) {
+                  streamingStarted = true;
+                  // Reasoning is a genuine alive signal too — clear the
+                  // "waiting" status line so the UI shows the thought block
+                  // instead of "Working… Ns".
+                  yield emit("status", { message: "", iteration: iterationLabel, model });
+                }
+                yield emit("reasoning.delta", { text: data.text });
+                break;
+              }
               case "tool_call.start": {
-                const data = event.data as { toolCallId: string; toolName: string; index: number };
+                const data = ev.data as { toolCallId: string; toolName: string; index: number };
                 toolCallArgs.set(data.index, { id: data.toolCallId, name: data.toolName, args: "" });
                 yield emit("tool.start", { toolCallId: data.toolCallId, toolName: data.toolName });
                 break;
               }
               case "tool_call.args.delta": {
-                const data = event.data as { index: number; delta: string };
+                const data = ev.data as { index: number; delta: string };
                 const acc = toolCallArgs.get(data.index);
                 if (acc) acc.args += data.delta;
                 break;
               }
               case "tool_call.complete": {
-                const data = event.data as { index: number; toolCallId: string; toolName: string; arguments: string };
+                const data = ev.data as { index: number; toolCallId: string; toolName: string; arguments: string };
                 const tc: ToolCall = {
                   id: data.toolCallId,
                   type: "function",
@@ -212,7 +425,7 @@ export class AgentEngine {
                 break;
               }
               case "finish": {
-                const data = event.data as { finishReason: string; model: string; usage?: {
+                const data = ev.data as { finishReason: string; model: string; usage?: {
                   inputTokens: number;
                   outputTokens: number;
                   cachedTokens: number;
@@ -226,18 +439,22 @@ export class AgentEngine {
                 break;
               }
               case "model.fallback": {
-                const data = event.data as { from: string; to: string; reason: string };
+                const data = ev.data as { from: string; to: string; reason: string };
                 yield emit("model.fallback", data);
                 break;
               }
               case "error": {
+                if (session.superseded) {
+                  finalizeTask();
+                  return;
+                }
                 if (session.isCancelled()) {
                   taskStatus = "cancelled";
                   yield emit("cancelled");
                   yield emit("task.summary", finalizeTask());
                   return;
                 }
-                const data = event.data as {
+                const data = ev.data as {
                   message: string;
                   allFreeModelsExhausted?: boolean;
                   triedModels?: string[];
@@ -296,6 +513,10 @@ export class AgentEngine {
             cost: capturedUsage?.cost ?? 0,
             success: false,
           });
+          if (session.superseded) {
+            finalizeTask();
+            return;
+          }
           if (session.isCancelled()) {
             taskStatus = "cancelled";
             yield emit("cancelled");
@@ -331,6 +552,9 @@ export class AgentEngine {
           role: "assistant",
           content: assistantContent,
         };
+        if (assistantReasoning) {
+          assistantMsg.reasoning = assistantReasoning;
+        }
         if (assistantToolCalls.length > 0) {
           assistantMsg.toolCalls = assistantToolCalls;
         }
@@ -387,6 +611,19 @@ export class AgentEngine {
             session.iterationCount = iteration;
             continue;
           }
+
+          // Last iteration — if the model returned empty content, emit a
+          // fallback message so the user never sees a silent "done".
+          if (isEmpty) {
+            const fallback = "I wasn't able to produce a response for this request. This may be due to a model limitation or an overly long conversation context. Try rephrasing your request or starting a new session.";
+            assistantContent = fallback;
+            yield emit("text.delta", { text: fallback });
+            // Update the assistant message in session with the fallback.
+            if (session.messages.length > 0) {
+              const lastMsg = session.messages[session.messages.length - 1];
+              if (lastMsg.role === "assistant") lastMsg.content = fallback;
+            }
+          }
           session.status = "done";
           taskStatus = "success";
           yield emit("done");
@@ -397,6 +634,11 @@ export class AgentEngine {
         // Execute tool calls
         let iterationHadError = false;
         for (const tc of assistantToolCalls) {
+          if (session.superseded) {
+            telemetryStore.markIterationEnd(task, iterationHadError);
+            finalizeTask();
+            return;
+          }
           if (session.isCancelled()) {
             taskStatus = "cancelled";
             telemetryStore.markIterationEnd(task, iterationHadError);
@@ -431,15 +673,24 @@ export class AgentEngine {
             continue;
           }
 
-          // Check cache
+          // Check cache — L1 (session) then L2 (workspace)
           const cacheKey = tc.function.name;
           const cached = session.cache.get(cacheKey, parsedArgs);
-          if (cached !== null) {
+          const l2Cached = cached === null && L2_CACHEABLE_TOOLS.has(tc.function.name)
+            ? workspace.workspaceCache.get(cacheKey, parsedArgs)
+            : null;
+          if (cached !== null || l2Cached !== null) {
+            const hit = cached !== null ? cached : l2Cached;
             yield emit("tool.cache_hit", { toolCallId: tc.id, toolName: tc.function.name });
             telemetryStore.recordToolCall(task, tc.function.name, { cached: true, success: true });
+            // Populate L1 from L2 so the next session-level check hits L1.
+            if (cached === null && l2Cached !== null) {
+              const filePath = parsedArgs.path as string | undefined;
+              session.cache.set(cacheKey, parsedArgs, l2Cached, filePath);
+            }
             session.messages.push({
               role: "tool",
-              content: JSON.stringify(cached),
+              content: JSON.stringify(hit),
               toolCallId: tc.id,
               name: tc.function.name,
             });
@@ -506,6 +757,31 @@ export class AgentEngine {
             }
           }
 
+          // B1: repeat-failure guard — if the exact same tool+args already
+          // failed earlier this session and no write has succeeded since,
+          // skip execution and return the cached error. Prevents the model
+          // from burning iterations on identical broken calls.
+          const argsHash = `${tc.function.name}:${JSON.stringify(parsedArgs)}`;
+          const priorError = session.failedCallCache.get(argsHash);
+          if (priorError) {
+            const guardMsg = `${priorError}\n\nYou already tried this exact call and it failed. Do NOT repeat it unchanged — fix the arguments or change approach.`;
+            yield emit("tool.error", {
+              toolCallId: tc.id,
+              toolName: tc.function.name,
+              error: guardMsg,
+            });
+            telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: false });
+            task.redundantCallsAvoided++;
+            iterationHadError = true;
+            session.messages.push({
+              role: "tool",
+              content: JSON.stringify({ error: guardMsg, redundantCallBlocked: true }),
+              toolCallId: tc.id,
+              name: tc.function.name,
+            });
+            continue;
+          }
+
           try {
             const result: ToolResult = await handler(parsedArgs, ctx);
 
@@ -521,6 +797,8 @@ export class AgentEngine {
               });
               telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: false });
               iterationHadError = true;
+              // B1: record this failure so an identical call isn't re-executed.
+              session.failedCallCache.set(argsHash, errorMsg);
               session.messages.push({
                 role: "tool",
                 content: JSON.stringify({ error: errorMsg }),
@@ -537,9 +815,17 @@ export class AgentEngine {
             });
             telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: true });
 
-            // Cache the result
+            // Phase 4: track run_tests results for outcome detection.
+            if (tc.function.name === "run_tests") {
+              task.testResults.push(result.output);
+            }
+
+            // Cache the result — L1 (session) always, L2 (workspace) for read-only tools.
             const filePath = parsedArgs.path as string | undefined;
             session.cache.set(tc.function.name, parsedArgs, result.output, filePath);
+            if (L2_CACHEABLE_TOOLS.has(tc.function.name)) {
+              workspace.workspaceCache.set(tc.function.name, parsedArgs, result.output, filePath);
+            }
 
             // Invalidate cache on writes
             if (["write_file", "apply_patch", "create_file", "delete_file"].includes(tc.function.name)) {
@@ -548,11 +834,24 @@ export class AgentEngine {
               // Commands and tests may depend on the changed file's contents —
               // stale cached output would hide whether the edit actually worked.
               session.cache.invalidateCommands();
+              // B1: a successful write means the model has made progress —
+              // clear the failure cache so it can retry previously-failed
+              // calls with the new file state.
+              session.failedCallCache.clear();
+            }
+
+            // A1: truncate large tool results before they enter conversation
+            // history. The full result was already emitted to the UI above; only
+            // the copy re-sent on every subsequent LLM request is trimmed.
+            const fullOutput = JSON.stringify(result.output);
+            const { content: truncatedOutput, tokensSaved } = truncateToolContent(fullOutput);
+            if (tokensSaved > 0) {
+              task.truncationTokensSaved += tokensSaved;
             }
 
             session.messages.push({
               role: "tool",
-              content: JSON.stringify(result.output),
+              content: truncatedOutput,
               toolCallId: tc.id,
               name: tc.function.name,
             });
@@ -567,6 +866,8 @@ export class AgentEngine {
             });
             telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: false });
             iterationHadError = true;
+            // B1: record this failure so an identical call isn't re-executed.
+            session.failedCallCache.set(argsHash, errorMsg);
 
             session.messages.push({
               role: "tool",
@@ -580,10 +881,69 @@ export class AgentEngine {
         telemetryStore.markIterationEnd(task, iterationHadError);
         iteration++;
         session.iterationCount = iteration;
+
+        // --- Exploration cap: if the model has spent several consecutive
+        // iterations calling only read-only tools (read_file, list_files,
+        // search_files, etc.) without making any changes, inject a nudge
+        // to either produce a plan or start implementing. Prevents the
+        // "explore forever, never act" failure mode common with free models. ---
+        const allToolsReadonly = assistantToolCalls.length > 0 &&
+          assistantToolCalls.every((tc) => READ_ONLY_TOOLS.has(tc.function.name));
+        if (allToolsReadonly) {
+          consecutiveReadonlyIters++;
+        } else {
+          consecutiveReadonlyIters = 0;
+        }
+        if (consecutiveReadonlyIters >= MAX_EXPLORATION_ITERATIONS && iteration < this.maxIterations - 1) {
+          session.messages.push({
+            role: "user",
+            content: "You've spent several iterations exploring the codebase. Stop reading files and either: (1) write a brief plan of what you'll change, then immediately start implementing it, or (2) start making changes now with apply_patch/create_file. Do not call any more read-only tools unless strictly necessary.",
+          });
+          consecutiveReadonlyIters = 0;  // reset so the nudge doesn't fire every iteration
+        }
+
+        // --- Phase 3: intra-task escalation — if 2 consecutive iterations
+        // end in tool errors and the current model is not the top allowed
+        // tier, switch to the next tier for the remainder of the task. ---
+        if (iterationHadError) {
+          consecutiveErrors++;
+        } else {
+          consecutiveErrors = 0;
+        }
+        if (
+          consecutiveErrors >= 2 &&
+          this.routerSettings.mode === "auto" &&
+          this.routerSettings.allowedTiers.length > 1
+        ) {
+          const currentTier = modelRegistry.tierOf(model);
+          const tierOrder: Record<string, number> = { free: 0, mid: 1, frontier: 2 };
+          const currentIdx = tierOrder[currentTier] ?? 0;
+          const nextTier = this.routerSettings.allowedTiers
+            .filter((t) => (tierOrder[t] ?? 0) > currentIdx)
+            .sort((a, b) => (tierOrder[a] ?? 0) - (tierOrder[b] ?? 0))[0];
+          if (nextTier) {
+            const nextModels = modelRegistry.byTier(nextTier).filter((e) => e.toolsCapable);
+            if (nextModels.length > 0) {
+              const oldModel = model;
+              model = nextModels[0].id;
+              consecutiveErrors = 0;
+              task.escalations++;
+              yield emit("model.escalated", {
+                from: oldModel,
+                to: model,
+                reason: "repeated tool failures",
+              });
+            }
+          }
+        }
       }
 
       // Hit iteration cap — one last text-only turn so command output
       // actually reaches the user instead of dying on a silent tool card.
+      if (session.superseded) {
+        finalizeTask();
+        return;
+      }
       if (session.isCancelled()) {
         taskStatus = "cancelled";
         yield emit("cancelled");
@@ -592,10 +952,35 @@ export class AgentEngine {
       }
 
       const summaryMessages = this.buildProviderMessages(session);
-      summaryMessages.push({
-        role: "user",
-        content: "You have reached the tool-call limit. Do not call any more tools. Summarize what you did and quote any command stdout/stderr the user asked to see.",
-      });
+
+      // If the user asked for an action (code/build/create) but no files
+      // were modified during the task, the model burned all iterations on
+      // exploration/commands without producing the requested work. Instead
+      // of a text-only summary that ends with a "plan", inject a
+      // continuation nudge so the model starts writing files immediately
+      // in the summary turn (which allows tool calls).
+      const filesModifiedInSession = session.messages.some(
+        (m) =>
+          m.role === "assistant" &&
+          m.toolCalls?.some((tc) =>
+            ["create_file", "write_file", "apply_patch"].includes(tc.function.name),
+          ),
+      );
+      const initialUserPrompt = session.messages.find((m) => m.role === "user")?.content.trim() ?? "";
+      const isActionRequest = /^(code|build|create|implement|make|write|develop|generate|setup|set up|adapt|port|rewrite)\b/i.test(
+        initialUserPrompt,
+      );
+      if (isActionRequest && !filesModifiedInSession) {
+        summaryMessages.push({
+          role: "user",
+          content: "You've reached the tool-call limit but haven't written any files yet. Stop exploring and start implementing NOW. Use create_file or apply_patch to write the code the user asked for. Do not call read_file, list_files, or execute_command — write the files directly.",
+        });
+      } else {
+        summaryMessages.push({
+          role: "user",
+          content: "You have reached the tool-call limit. Do not call any more tools. Summarize what you did and quote any command stdout/stderr the user asked to see.",
+        });
+      }
 
       const summaryRawTokens = estimateTotalTokens(summaryMessages);
       const summaryRequestStart = Date.now();
@@ -607,20 +992,67 @@ export class AgentEngine {
         cost: number;
       } | undefined;
       let summaryText = "";
+      const summaryModel = session.modelUsed || model;
+      yield emit("status", {
+        message: `summarizing → requesting ${summaryModel}…`,
+        iteration: iteration + 1,
+        model: summaryModel,
+      });
+      let summaryStreamingStarted = false;
       try {
-        for await (const event of this.provider.chat(summaryMessages, {
-          model: session.modelUsed || model,
-          signal: session.abortController.signal,
-        })) {
-          if (event.type === "text.delta") {
-            const data = event.data as { text: string };
+        const summaryStream = withHeartbeat(
+          this.provider.chat(summaryMessages, {
+            model: summaryModel,
+            signal: session.abortController.signal,
+          }),
+          HEARTBEAT_INTERVAL_MS,
+          session.abortController.signal,
+        );
+        for await (const event of summaryStream) {
+          if (event && (event as Heartbeat).__heartbeat) {
+            const hb = event as Heartbeat;
+            if (session.superseded) {
+              finalizeTask();
+              return;
+            }
+            if (session.isCancelled()) {
+              taskStatus = "cancelled";
+              yield emit("cancelled");
+              yield emit("task.summary", finalizeTask());
+              return;
+            }
+            yield emit("progress", {
+              elapsedMs: hb.elapsedMs,
+              phase: summaryStreamingStarted ? "streaming" : "requesting",
+            });
+            continue;
+          }
+          const ev = event as ProviderEvent;
+          if (ev.type === "provider.queued") {
+            yield emit("progress", {
+              elapsedMs: Date.now() - summaryRequestStart,
+              phase: "queued",
+            });
+          } else if (ev.type === "text.delta") {
+            const data = ev.data as { text: string };
+            if (!summaryStreamingStarted) {
+              summaryStreamingStarted = true;
+              yield emit("status", { message: "", iteration: iteration + 1, model: summaryModel });
+            }
             summaryText += data.text;
             yield emit("text.delta", { text: data.text });
-          } else if (event.type === "finish") {
-            const data = event.data as { usage?: typeof summaryUsage };
+          } else if (ev.type === "reasoning.delta") {
+            const data = ev.data as { text: string };
+            if (!summaryStreamingStarted) {
+              summaryStreamingStarted = true;
+              yield emit("status", { message: "", iteration: iteration + 1, model: summaryModel });
+            }
+            yield emit("reasoning.delta", { text: data.text });
+          } else if (ev.type === "finish") {
+            const data = ev.data as { usage?: typeof summaryUsage };
             if (data.usage) summaryUsage = data.usage;
-          } else if (event.type === "error") {
-            const data = event.data as { message: string };
+          } else if (ev.type === "error") {
+            const data = ev.data as { message: string };
             telemetryStore.recordRequest(task, {
               model: session.modelUsed || model,
               requestType: "final_response",
@@ -684,6 +1116,12 @@ export class AgentEngine {
 
       if (summaryText) {
         session.messages.push({ role: "assistant", content: summaryText });
+      } else {
+        // The summary turn returned empty — emit a fallback so the user
+        // never sees a silent completion after hitting the iteration cap.
+        const fallback = "I reached the tool-call limit for this task. The work may be partially complete — please check the workspace for any files that were created or modified, and let me know if you'd like me to continue.";
+        yield emit("text.delta", { text: fallback });
+        session.messages.push({ role: "assistant", content: fallback });
       }
       session.status = "done";
       taskStatus = "success";
@@ -703,6 +1141,51 @@ export class AgentEngine {
         finalizeTask();
       }
     }
+  }
+
+  /**
+   * Remove trailing messages from an abandoned turn that would leave the
+   * conversation in a malformed state for the next provider request.
+   *
+   * When a turn is interrupted mid-tool-execution, the session may end with:
+   *   - An assistant message with tool_calls but no tool results, OR
+   *   - Some tool results but not all (e.g. 3 tool_calls, only 1 result).
+   *
+   * Both cases produce an invalid message sequence that providers reject
+   * or respond to with empty content. This method trims the trailing
+   * assistant message and any partial tool results that belong to it.
+   */
+  private cleanupOrphanedToolCalls(session: AgentSession): void {
+    const msgs = session.messages;
+    if (msgs.length === 0) return;
+
+    // Find the last assistant message that has tool_calls.
+    let lastAssistantIdx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+        lastAssistantIdx = i;
+        break;
+      }
+    }
+    if (lastAssistantIdx === -1) return;
+
+    // Check whether ALL tool_calls from that assistant message have
+    // corresponding tool-result messages after it.
+    const expectedIds = new Set(msgs[lastAssistantIdx].toolCalls!.map((tc) => tc.id));
+    const resolvedIds = new Set<string>();
+    for (let i = lastAssistantIdx + 1; i < msgs.length; i++) {
+      if (msgs[i].role === "tool" && msgs[i].toolCallId) {
+        resolvedIds.add(msgs[i].toolCallId!);
+      }
+    }
+    const allResolved = [...expectedIds].every((id) => resolvedIds.has(id));
+    if (allResolved) return;
+
+    // Not all tool calls were resolved — remove the assistant message and
+    // everything after it (the partial tool results are orphaned without
+    // their parent assistant message).
+    msgs.splice(lastAssistantIdx);
   }
 
   private buildProviderMessages(session: AgentSession): ProviderMessage[] {
@@ -728,5 +1211,77 @@ export class AgentEngine {
     }
 
     return messages;
+  }
+}
+
+// --- Synthetic progress heartbeat ---------------------------------------------
+
+/** How often to emit a `progress` event while the provider is silent (no
+ *  tokens, no tool calls). Tuned so the user sees a live "waiting 8s…"
+ *  indicator without flooding the SSE stream. */
+const HEARTBEAT_INTERVAL_MS = 8_000;
+
+/** Marker yielded by `withHeartbeat` when the provider hasn't produced an
+ *  event within the heartbeat interval. The engine turns these into
+ *  `progress` AgentEvents. */
+interface Heartbeat {
+  __heartbeat: true;
+  elapsedMs: number;
+}
+
+/**
+ * Wrap a provider async iterable so that, while the provider is silent (its
+ * `.next()` hasn't resolved), a heartbeat marker is yielded every
+ * `intervalMs`. This lets the engine surface "Working… Ns · waiting for
+ * model response" to the UI during the pre-headers hang and mid-stream
+ * stalls — the two failure modes that real reasoning/thought deltas can't
+ * cover (zero bytes arrive during a true stall).
+ *
+ * Async iterators generally do not support concurrent `.next()` calls, so
+ * we call `.next()` once per outer iteration and then race that single
+ * pending promise against repeated timers in an inner loop until it
+ * resolves. On abort the wrapper returns immediately.
+ */
+export async function* withHeartbeat(
+  iterable: AsyncIterable<ProviderEvent>,
+  intervalMs: number,
+  signal: AbortSignal,
+): AsyncIterable<ProviderEvent | Heartbeat> {
+  const iter = iterable[Symbol.asyncIterator]();
+  const start = Date.now();
+  try {
+    while (true) {
+      if (signal.aborted) return;
+      const nextPromise = iter.next();
+      // Inner loop: race the single pending .next() against fresh timers
+      // until the real event resolves. Never call .next() concurrently.
+      while (true) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timerPromise = new Promise<Heartbeat>((resolve) => {
+          timer = setTimeout(
+            () => resolve({ __heartbeat: true, elapsedMs: Date.now() - start }),
+            intervalMs,
+          );
+        });
+        const raced = (await Promise.race([nextPromise, timerPromise])) as
+          | Heartbeat
+          | IteratorResult<ProviderEvent>;
+        if (raced && (raced as Heartbeat).__heartbeat) {
+          if (signal.aborted) return;
+          yield raced as Heartbeat;
+          continue; // timer already fired — set a fresh one, same nextPromise
+        }
+        if (timer) clearTimeout(timer);
+        const r = raced as IteratorResult<ProviderEvent>;
+        if (r.done) return;
+        yield r.value;
+        break; // got a real event → outer loop calls .next() again
+      }
+    }
+  } finally {
+    // Trigger the provider generator's finally block (releases the reader,
+    // cleans up timers) when the engine stops consuming — cancel, supersede,
+    // or error.
+    await iter.return?.();
   }
 }

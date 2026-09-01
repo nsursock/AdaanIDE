@@ -39,6 +39,16 @@ export type {
   TelemetryData,
   TelemetrySummary,
 } from "./telemetry/index.js";
+export { ModelRegistry, modelRegistry } from "./registry/index.js";
+export type { RegistryEntry, RegistryData, ModelTier } from "./registry/index.js";
+export { mergeEmpirical, assignTiers } from "./registry/index.js";
+export { classifyTask, routeModel, DEFAULT_ROUTER_SETTINGS } from "./router/index.js";
+export type { TaskClassification, TaskCategory, RouterSettings, RouteResult } from "./router/index.js";
+export { BenchmarkRunner, benchmarkRunner, BENCHMARK_TASKS, buildCapabilityMatrix } from "./benchmark/index.js";
+export type { BenchmarkResult, CapabilityCell, CapabilityMatrix, BenchmarkTask, BenchmarkProgress } from "./benchmark/index.js";
+export { LearnedModelStats, learnedStats, bayesianSmooth, applyDecay, expectedRequests } from "./learn/index.js";
+export type { Outcome, LearnedCell, LearnedData, Posterior, LearnReport, DriftAlert } from "./learn/index.js";
+export { detectOutcome, isCorrectionMessage, isUpgrade, OUTCOME_WEIGHTS, buildReport, detectDrift, thompsonSelect, routeWithLearning, seededRng } from "./learn/index.js";
 export {
   initProvider,
   updateProviderKey,

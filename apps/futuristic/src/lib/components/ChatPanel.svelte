@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { chatStore, workspaceStore, type ModelInfo, type ChatMessageEntry } from "@adaan/core";
+  import { chatStore, workspaceStore, settingsStore, type ModelInfo, type ChatMessageEntry } from "@adaan/core";
   import { onMount } from "svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ModelPicker from "./ModelPicker.svelte";
@@ -16,6 +16,8 @@
     IconCpu,
     IconClipboard,
     IconCheck,
+    IconBolt,
+    IconClockPause,
   } from "@tabler/icons-svelte";
 
   let { workspaceRoot, onFileChanged = () => {} } = $props();
@@ -61,10 +63,67 @@
   }
 
   async function send() {
-    if (!input.trim() || chatStore.streaming) return;
+    if (!input.trim()) return;
+    if (chatStore.streaming) return;
     const message = input.trim();
     input = "";
     await sendMessage(message);
+  }
+
+  /**
+   * Interrupt the current turn and send a new message immediately.
+   * The backend aborts the in-flight generator and starts a fresh one.
+   */
+  async function sendInterrupt() {
+    if (!input.trim()) return;
+    const message = input.trim();
+    input = "";
+
+    // Close the current SSE stream — the new turn will open a fresh one.
+    eventSource?.close();
+    eventSource = null;
+    pendingApprovals = [];
+    chatStore.cancelPendingToolCalls();
+    chatStore.finishStreaming();
+
+    await sendMessage(message);
+  }
+
+  /**
+   * Queue a message to be sent after the current turn finishes.
+   * The backend stores it and processes it when the current generator
+   * completes.
+   */
+  async function sendQueue() {
+    if (!input.trim() || !chatStore.streaming) return;
+    const message = input.trim();
+    input = "";
+
+    const model = chatStore.selectedModel?.id || undefined;
+    const contextLength = chatStore.selectedModel?.contextLength || 4096;
+    const effectiveModel = settingsStore.settings.routingMode === "auto" ? "auto" : model;
+
+    await fetch("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceRoot,
+        message,
+        model: effectiveModel,
+        contextLength,
+        sessionId: chatStore.sessionId,
+        routingMode: settingsStore.settings.routingMode,
+        routingThreshold: settingsStore.settings.routingThreshold,
+        routingTiers: settingsStore.settings.routingTiers,
+        explorationPaidEnabled: settingsStore.settings.explorationPaidEnabled,
+        interrupt: false,
+      }),
+    });
+
+    // Show the queued message in the UI immediately so the user knows
+    // it's waiting. The actual assistant response will appear when the
+    // current turn finishes and the queued one starts.
+    chatStore.addUserMessage(message);
   }
 
   /**
@@ -84,15 +143,24 @@
     const model = chatStore.selectedModel?.id || undefined;
     const contextLength = chatStore.selectedModel?.contextLength || 4096;
 
+    // Phase 3: when routing mode is "auto", send "auto" as the model so the
+    // engine's router picks the cheapest model likely to succeed.
+    const effectiveModel = settingsStore.settings.routingMode === "auto" ? "auto" : model;
+
     const res = await fetch("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         workspaceRoot,
         message,
-        model,
+        model: effectiveModel,
         contextLength,
         sessionId: chatStore.sessionId,
+        routingMode: settingsStore.settings.routingMode,
+        routingThreshold: settingsStore.settings.routingThreshold,
+        routingTiers: settingsStore.settings.routingTiers,
+        explorationPaidEnabled: settingsStore.settings.explorationPaidEnabled,
+        interrupt: true,
       }),
     });
 
@@ -109,6 +177,10 @@
 
     eventSource?.close();
     eventSource = new EventSource(`/api/sessions/${sessionId}/events`);
+
+    // Track whether we received a terminal event so onerror can
+    // distinguish a clean close from a mid-stream disconnect.
+    let streamTerminated = false;
 
     eventSource.onmessage = (e) => {
       const event = JSON.parse(e.data);
@@ -144,6 +216,7 @@
       }
 
       if (event.type === "done" || event.type === "error" || event.type === "cancelled") {
+        streamTerminated = true;
         eventSource?.close();
         eventSource = null;
       }
@@ -152,6 +225,16 @@
     eventSource.onerror = () => {
       eventSource?.close();
       eventSource = null;
+      // If we never received a terminal event, the connection was lost
+      // mid-stream (server crash, network drop, or stalled request that
+      // the hard-deadline killed). Show an error instead of leaving a
+      // silent empty bubble with "Streaming" stuck on.
+      if (!streamTerminated && chatStore.streaming) {
+        chatStore.setAssistantError(
+          assistantId,
+          "Connection lost — the request stalled or the server dropped the stream. Try sending your message again.",
+        );
+      }
       chatStore.finishStreaming();
     };
   }
@@ -427,21 +510,36 @@
       <div class="flex gap-2 items-end mt-1">
         <textarea
           bind:value={input}
-          placeholder="Instruct the neural agent..."
+          placeholder={chatStore.streaming ? "Type to interrupt or queue..." : "Instruct the neural agent..."}
           class="chat-input flex-1"
           rows="2"
           onkeydown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              send();
+              if (chatStore.streaming) {
+                sendInterrupt();
+              } else {
+                send();
+              }
             }
           }}
         ></textarea>
 
         {#if chatStore.streaming}
-          <button class="chat-send cancel" onclick={cancel} title="Halt generation" aria-label="Cancel">
-            <IconSquare size={15} />
-          </button>
+          <div class="flex flex-col gap-1">
+            {#if input.trim()}
+              <button class="chat-send interrupt" onclick={sendInterrupt} title="Interrupt & send now" aria-label="Interrupt and send">
+                <IconBolt size={15} />
+              </button>
+              <button class="chat-send queue" onclick={sendQueue} title="Queue for after current turn" aria-label="Queue message">
+                <IconClockPause size={15} />
+              </button>
+            {:else}
+              <button class="chat-send cancel" onclick={cancel} title="Halt generation" aria-label="Cancel">
+                <IconSquare size={15} />
+              </button>
+            {/if}
+          </div>
         {:else}
           <button class="chat-send" onclick={send} disabled={!input.trim()} title="Send command" aria-label="Send">
             <IconSend size={15} />
@@ -451,8 +549,13 @@
     </div>
 
     <div class="flex justify-between items-center px-1.5 pt-1.5 text-[0.625rem] text-[var(--color-muted)] opacity-60">
-      <span>ENTER to send</span>
-      <span>SHIFT+ENTER for new line</span>
+      {#if chatStore.streaming}
+        <span>ENTER to interrupt</span>
+        <span>SHIFT+ENTER for new line</span>
+      {:else}
+        <span>ENTER to send</span>
+        <span>SHIFT+ENTER for new line</span>
+      {/if}
     </div>
   </div>
 </div>

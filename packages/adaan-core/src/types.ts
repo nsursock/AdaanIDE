@@ -90,6 +90,7 @@ export interface ModelGroups {
 
 export type AgentEventType =
   | "text.delta"
+  | "reasoning.delta"
   | "tool.start"
   | "tool.args"
   | "tool.result"
@@ -100,7 +101,11 @@ export type AgentEventType =
   | "model.used"
   | "model.fallback"
   | "model.free_exhausted"
+  | "model.routed"
+  | "model.escalated"
   | "task.summary"
+  | "status"
+  | "progress"
   | "done"
   | "error"
   | "cancelled";
@@ -114,6 +119,35 @@ export interface AgentEvent {
 
 export interface TextDeltaData {
   text: string;
+}
+
+/** A chunk of model reasoning/thinking, streamed from providers that support
+ *  it (e.g. o1, DeepSeek-R1, Claude w/ extended thinking). Distinct from
+ *  `text.delta` so the UI can render it in a separate, muted, collapsible
+ *  block above the final answer. OpenRouter streams this via either
+ *  `delta.reasoning` (their native field) or `delta.reasoning_content`
+ *  (OpenAI/DeepSeek-compatible); the provider reads both. */
+export interface ReasoningDeltaData {
+  text: string;
+}
+
+/** Synthetic progress signal — emitted by the engine while the provider is
+ *  silent (no tokens yet) so the UI can show "Working… 23s · waiting for
+ *  model response" instead of a dead-looking bubble. `elapsedMs` is the time
+ *  since the current LLM request started; `phase` indicates what we're
+ *  waiting on. */
+export interface ProgressData {
+  elapsedMs: number;
+  phase: "requesting" | "queued" | "streaming";
+}
+
+/** Status line emitted at the start of each iteration's LLM request, e.g.
+ *  "iteration 2 → requesting qwen3.8-max…". Replaces (or refines) the
+ *  `phase` shown by progress heartbeats. */
+export interface StatusData {
+  message: string;
+  iteration: number;
+  model: string;
 }
 
 export interface ToolStartData {
@@ -180,6 +214,17 @@ export interface TaskSummaryData {
   cost: number;
   durationMs: number;
   status: "success" | "error" | "cancelled";
+  /** Phase 2: tokens saved by truncation + compaction (A1/A2). */
+  truncationTokensSaved: number;
+  compactionTokensSaved: number;
+  /** Phase 2: redundant calls blocked by the repeat-failure guard (B1). */
+  redundantCallsAvoided: number;
+  /** Phase 3: whether this task was routed by the adaptive router. */
+  routedBy: "auto" | "manual";
+  /** Phase 3: task category from the classifier. */
+  category: string | null;
+  /** Phase 3: number of intra-task escalations. */
+  escalations: number;
 }
 
 // --- Chat Messages -----------------------------------------------------------
@@ -192,6 +237,12 @@ export interface ChatMessage {
   toolCalls?: ToolCall[];
   toolCallId?: string;
   name?: string;
+  /** Reasoning/thinking text from reasoning-capable models (o1, DeepSeek-R1,
+   *  Claude w/ extended thinking). Stored on the message so it round-trips
+   *  through the session and can be re-displayed, but NOT sent back to the
+   *  provider on subsequent requests (providers don't accept reasoning in
+   *  the message history — it would be rejected or ignored). */
+  reasoning?: string;
 }
 
 export interface ToolCall {
@@ -232,11 +283,13 @@ export interface ProviderChatOptions {
 
 export type ProviderEventType =
   | "text.delta"
+  | "reasoning.delta"
   | "tool_call.start"
   | "tool_call.args.delta"
   | "tool_call.complete"
   | "finish"
   | "model.fallback"
+  | "provider.queued"
   | "error";
 
 export interface ProviderEvent {

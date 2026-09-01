@@ -15,6 +15,16 @@ export class AgentSession {
   abortController: AbortController = new AbortController();
   cache: ToolResultCache = new ToolResultCache();
 
+  /** Set by resume() when a new turn supersedes an in-flight one. The
+   *  old engine.run() generator checks this to exit silently instead of
+   *  emitting error/cancelled events that would clobber the new turn's UI. */
+  superseded = false;
+
+  /** B1: repeat-failure guard — maps argsHash to the last error for a failed
+   *  tool call. Cleared on any successful write. Prevents the model from
+   *  re-issuing an identical failed call (e.g. malformed apply_patch 3×). */
+  failedCallCache: Map<string, string> = new Map();
+
   // Pending approval requests: toolCallId -> resolver
   private pendingApprovals: Map<string, (approved: boolean) => void> = new Map();
 
@@ -48,9 +58,18 @@ export class AgentSession {
 
   /** Prepare a finished/cancelled session to accept another user turn. */
   resume() {
-    if (this.abortController.signal.aborted) {
-      this.abortController = new AbortController();
+    // If a turn is currently running, mark it as superseded so the old
+    // engine.run() generator exits silently instead of emitting events
+    // that would clobber the new turn's UI.
+    if (this.status === "running") {
+      this.superseded = true;
     }
+    // ALWAYS abort the previous AbortController so any in-flight
+    // engine.run() generator stops calling the provider and pushing to
+    // session.messages. Without this, two generators run concurrently,
+    // corrupting the conversation and causing empty responses.
+    this.abortController.abort();
+    this.abortController = new AbortController();
     // A new user message supersedes any in-flight turn. If the previous
     // engine.run() generator is still suspended waiting on a tool approval
     // (e.g. the user typed a follow-up instead of answering the prompt),

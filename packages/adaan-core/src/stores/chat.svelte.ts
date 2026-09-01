@@ -1,10 +1,14 @@
-import type { AgentEvent, ModelInfo, ModelGroups, TaskSummaryData } from "../types.js";
+import type { AgentEvent, ModelInfo, ModelGroups, TaskSummaryData, ProgressData, StatusData, ReasoningDeltaData } from "../types.js";
 import { settingsStore } from "./settings.svelte.js";
 
 export interface ChatMessageEntry {
   id: string;
   role: "user" | "assistant" | "tool";
   content: string;
+  /** Reasoning/thinking text from reasoning-capable models, streamed token
+   *  by token and rendered in a separate muted, collapsible block above the
+   *  final answer. Accumulated as `reasoning.delta` events arrive. */
+  reasoning?: string;
   toolCalls?: Array<{
     id: string;
     name: string;
@@ -18,6 +22,10 @@ export interface ChatMessageEntry {
   modelUsed?: string;
   timestamp: number;
   error?: string;
+  /** Live status line shown under the streaming bubble while the provider is
+   *  silent — "iteration 2 → requesting qwen3.8-max…" or "Working… 23s ·
+   *  queued at provider". Cleared (set to null) on the first real token. */
+  status?: { message: string; elapsedMs?: number; phase?: ProgressData["phase"] } | null;
   /** Set when the provider had to fall back from the user's selected model
    *  to a different one (e.g. free-tier 429 after retry). Shown in the UI so
    *  the swap is visible rather than silently mislabeling the reply. Each
@@ -30,6 +38,10 @@ export interface ChatMessageEntry {
   /** Per-task cost/token footer, emitted at the end of a turn so the UI can
    *  show `7 reqs · 92k tokens · $0.031 · 84s` under the assistant message. */
   taskSummary?: TaskSummaryData;
+  /** Phase 3: set when the adaptive router picked the model for this task. */
+  routedTo?: { model: string; category: string; reason: string };
+  /** Phase 3: set when the model was escalated mid-task due to repeated failures. */
+  modelEscalations?: Array<{ from: string; to: string; reason: string }>;
 }
 
 class ChatStore {
@@ -91,6 +103,14 @@ class ChatStore {
     if (msg) msg.content += text;
   }
 
+  /** Append a chunk of model reasoning/thinking to the assistant message.
+   *  Kept separate from `content` so the UI can render it in a distinct,
+   *  muted, collapsible block above the final answer. */
+  appendReasoningToAssistant(id: string, text: string) {
+    const msg = this.messages.find((m) => m.id === id);
+    if (msg) msg.reasoning = (msg.reasoning ?? "") + text;
+  }
+
   setAssistantModel(id: string, modelId: string) {
     const msg = this.messages.find((m) => m.id === id);
     if (msg) msg.modelUsed = modelId;
@@ -99,6 +119,23 @@ class ChatStore {
   setAssistantError(id: string, error: string) {
     const msg = this.messages.find((m) => m.id === id);
     if (msg) msg.error = error;
+  }
+
+  /** Update the live status line under the streaming bubble. Pass `null` to
+   *  clear it (e.g. on the first real token or when the turn ends). */
+  setAssistantStatus(
+    id: string,
+    status: { message: string; elapsedMs?: number; phase?: ProgressData["phase"] } | null,
+  ) {
+    const msg = this.messages.find((m) => m.id === id);
+    if (!msg) return;
+    // Once the bubble has real content or has terminated, don't show a
+    // "waiting" line anymore.
+    if (status === null) {
+      msg.status = null;
+      return;
+    }
+    msg.status = status;
   }
 
   setFreeModelsExhausted(id: string, message: string, triedModels: string[]) {
@@ -235,6 +272,42 @@ class ChatStore {
       case "text.delta": {
         const data = event.data as { text: string };
         this.appendToAssistant(assistantId, data.text);
+        // First real token — clear the "waiting" status line.
+        this.setAssistantStatus(assistantId, null);
+        break;
+      }
+      case "reasoning.delta": {
+        const data = event.data as ReasoningDeltaData;
+        this.appendReasoningToAssistant(assistantId, data.text);
+        // Reasoning is a genuine alive signal — clear the "waiting" status
+        // line so the UI shows the thought block instead of "Working… Ns".
+        this.setAssistantStatus(assistantId, null);
+        break;
+      }
+      case "status": {
+        const data = event.data as StatusData;
+        // An empty message clears the line (used on first token / turn end).
+        if (!data.message) {
+          this.setAssistantStatus(assistantId, null);
+        } else {
+          this.setAssistantStatus(assistantId, { message: data.message });
+        }
+        break;
+      }
+      case "progress": {
+        const data = event.data as ProgressData;
+        const phaseLabel =
+          data.phase === "queued"
+            ? "queued at provider"
+            : data.phase === "streaming"
+              ? "waiting for model response"
+              : "waiting for model response";
+        const secs = Math.max(1, Math.round(data.elapsedMs / 1000));
+        this.setAssistantStatus(assistantId, {
+          message: `Working… ${secs}s · ${phaseLabel}`,
+          elapsedMs: data.elapsedMs,
+          phase: data.phase,
+        });
         break;
       }
       case "model.used": {
@@ -248,6 +321,23 @@ class ChatStore {
         if (msg) {
           if (!msg.modelFallback) msg.modelFallback = [];
           msg.modelFallback.push(data);
+        }
+        break;
+      }
+      case "model.routed": {
+        const data = event.data as { model: string; category: string; reason: string };
+        const msg = this.messages.find((m) => m.id === assistantId);
+        if (msg) {
+          msg.routedTo = { model: data.model, category: data.category, reason: data.reason };
+        }
+        break;
+      }
+      case "model.escalated": {
+        const data = event.data as { from: string; to: string; reason: string };
+        const msg = this.messages.find((m) => m.id === assistantId);
+        if (msg) {
+          if (!msg.modelEscalations) msg.modelEscalations = [];
+          msg.modelEscalations.push(data);
         }
         break;
       }
@@ -302,6 +392,7 @@ class ChatStore {
       }
       case "done":
       case "cancelled":
+        this.setAssistantStatus(assistantId, null);
         this.finishStreaming();
         break;
       case "task.summary": {
@@ -317,12 +408,14 @@ class ChatStore {
         if (data?.message) {
           this.setAssistantError(assistantId, data.message);
         }
+        this.setAssistantStatus(assistantId, null);
         this.finishStreaming();
         break;
       }
       case "model.free_exhausted": {
         const data = event.data as { message: string; triedModels: string[] };
         this.setFreeModelsExhausted(assistantId, data.message, data.triedModels);
+        this.setAssistantStatus(assistantId, null);
         this.finishStreaming();
         break;
       }

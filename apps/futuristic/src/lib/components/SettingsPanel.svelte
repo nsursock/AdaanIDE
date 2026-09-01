@@ -32,6 +32,8 @@
     IconEyeOff,
     IconAdjustments,
     IconCopy,
+    IconRoute,
+    IconBrain,
   } from "@tabler/icons-svelte";
 
   let { open = $bindable(false) } = $props();
@@ -339,6 +341,80 @@
         <div class="text-[0.625rem] text-[var(--color-muted)] opacity-70 leading-relaxed">
           The chosen model is remembered across reloads. If it becomes unavailable, the agent falls back to the first free tools-capable model.
         </div>
+      </section>
+
+      <!-- Phase 3: Adaptive routing -->
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <IconRoute size={14} class="text-[var(--color-accent)]" />
+          <span>Adaptive routing</span>
+        </div>
+        <label class="settings-row cursor-pointer">
+          <div>
+            <div class="text-xs font-semibold">Auto-route by task complexity</div>
+            <div class="text-[0.6875rem] text-[var(--color-muted)]">100% local classifier picks the cheapest model likely to succeed</div>
+          </div>
+          <button
+            class="toggle {settingsStore.settings.routingMode === 'auto' ? 'on' : ''}"
+            onclick={() => settingsStore.setRoutingMode(settingsStore.settings.routingMode === 'auto' ? 'manual' : 'auto')}
+            role="switch"
+            aria-checked={settingsStore.settings.routingMode === 'auto'}
+            aria-label="Toggle adaptive routing"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </label>
+        {#if settingsStore.settings.routingMode === 'auto'}
+          <div class="settings-field mt-2">
+            <div class="settings-field-label">
+              <span>Success threshold</span>
+              <span class="settings-value">{(settingsStore.settings.routingThreshold * 100).toFixed(0)}%</span>
+            </div>
+            <input
+              type="range"
+              min={0.3}
+              max={0.9}
+              step={0.05}
+              value={settingsStore.settings.routingThreshold}
+              oninput={(e) => settingsStore.setRoutingThreshold(Number(e.currentTarget.value))}
+            />
+          </div>
+          <div class="text-[0.625rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
+            Minimum empirical task success rate required to trust a model. Lower = more aggressive routing to cheap models.
+          </div>
+
+          <!-- Phase 4: Learning -->
+          <label class="settings-row cursor-pointer mt-2">
+            <div>
+              <div class="text-xs font-semibold">Learning from outcomes</div>
+              <div class="text-[0.6875rem] text-[var(--color-muted)]">Thompson sampling from task results — improves routing over time</div>
+            </div>
+            <button
+              class="toggle {settingsStore.settings.learningEnabled ? 'on' : ''}"
+              onclick={() => settingsStore.setLearningEnabled(!settingsStore.settings.learningEnabled)}
+              role="switch"
+              aria-checked={settingsStore.settings.learningEnabled}
+              aria-label="Toggle learning"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </label>
+          <label class="settings-row cursor-pointer">
+            <div>
+              <div class="text-xs font-semibold">Paid-model exploration</div>
+              <div class="text-[0.6875rem] text-[var(--color-muted)]">Allow exploration to spend paid requests (off = free-only exploration)</div>
+            </div>
+            <button
+              class="toggle {settingsStore.settings.explorationPaidEnabled ? 'on' : ''}"
+              onclick={() => settingsStore.setExplorationPaidEnabled(!settingsStore.settings.explorationPaidEnabled)}
+              role="switch"
+              aria-checked={settingsStore.settings.explorationPaidEnabled}
+              aria-label="Toggle paid exploration"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </label>
+        {/if}
       </section>
 
       <!-- API Key -->

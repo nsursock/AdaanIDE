@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ChatMessageEntry } from "@adaan/core";
   import ToolCallCard from "./ToolCallCard.svelte";
-  import { IconUser, IconBrain, IconCpu, IconSparkles, IconAlertTriangle, IconCreditCard, IconX } from "@tabler/icons-svelte";
+  import { IconUser, IconBrain, IconCpu, IconSparkles, IconAlertTriangle, IconCreditCard, IconX, IconRoute, IconArrowUp, IconChevronDown, IconChevronRight, IconBulb } from "@tabler/icons-svelte";
 
   let {
     msg,
@@ -12,6 +12,11 @@
     onTryPaidModel?: () => void;
     onDismissExhausted?: () => void;
   }>();
+
+  // Reasoning/thinking block — collapsible. Defaults to expanded while
+  // streaming (so the user sees live thoughts), collapses on turn end to
+  // keep the final answer front-and-center. Toggled manually thereafter.
+  let reasoningExpanded = $state(true);
 
   function fmtTokens(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -54,6 +59,21 @@
   <!-- Model fallback notice — the user's selected model was swapped after
        a transient failure, so the reply came from a different model. Shows
        the full cascade chain so the user sees every hop. -->
+  {#if msg.routedTo}
+    <div class="mb-2 flex items-center gap-1.5 text-[0.625rem] font-mono text-[var(--color-accent)] opacity-80">
+      <IconRoute size={11} class="flex-shrink-0" />
+      <span>auto → {msg.routedTo.model.split("/").pop()} · {msg.routedTo.category}</span>
+    </div>
+  {/if}
+  {#if msg.modelEscalations && msg.modelEscalations.length > 0}
+    <div class="mb-2 flex items-center gap-1.5 text-[0.625rem] font-mono text-[var(--color-warning)] opacity-80">
+      <IconArrowUp size={11} class="flex-shrink-0" />
+      {#each msg.modelEscalations as esc, i}
+        <span>{i > 0 ? " · " : ""}{esc.from.split("/").pop()} → {esc.to.split("/").pop()}</span>
+      {/each}
+    </div>
+  {/if}
+
   {#if msg.modelFallback && msg.modelFallback.length > 0}
     <div class="mb-2 p-2 rounded border border-[rgba(255,184,108,0.35)] bg-[rgba(255,184,108,0.07)] flex items-start gap-2 text-[var(--color-warning)] text-[0.6875rem] font-mono">
       <IconAlertTriangle size={13} class="flex-shrink-0 mt-0.5" />
@@ -72,10 +92,48 @@
     </div>
   {/if}
 
+  <!-- Reasoning / thinking — rendered above the final answer in a muted,
+       collapsible block. Only reasoning-capable models (o1, DeepSeek-R1,
+       Claude w/ extended thinking) produce this; for others it's absent. -->
+  {#if msg.reasoning}
+    <div class="reasoning-block mb-2">
+      <button
+        type="button"
+        class="reasoning-header"
+        onclick={() => (reasoningExpanded = !reasoningExpanded)}
+        aria-expanded={reasoningExpanded}
+        aria-label="Toggle reasoning"
+      >
+        {#if reasoningExpanded}
+          <IconChevronDown size={11} class="flex-shrink-0" />
+        {:else}
+          <IconChevronRight size={11} class="flex-shrink-0" />
+        {/if}
+        <IconBulb size={11} class="flex-shrink-0" />
+        <span>Reasoning</span>
+      </button>
+      {#if reasoningExpanded}
+        <div class="reasoning-body">
+          {msg.reasoning}
+        </div>
+      {/if}
+    </div>
+  {/if}
+
   <!-- Content -->
   {#if msg.content}
     <div class="text-[0.8125rem] whitespace-pre-wrap break-words leading-relaxed font-mono opacity-95">
       {msg.content}
+    </div>
+  {/if}
+
+  <!-- Live status line — shown while the provider is silent (no tokens yet)
+       so a stalled/queued request doesn't look like a dead empty bubble.
+       Cleared on the first real token or when the turn terminates. -->
+  {#if msg.status && msg.status.message}
+    <div class="mt-1 flex items-center gap-1.5 text-[0.6875rem] font-mono text-[var(--color-accent)] opacity-80">
+      <span class="status-pulse-dot"></span>
+      <span class="truncate">{msg.status.message}</span>
     </div>
   {/if}
 
@@ -133,11 +191,72 @@
       <span>{fmtCost(msg.taskSummary.cost)}</span>
       <span class="opacity-40">·</span>
       <span>{fmtDuration(msg.taskSummary.durationMs)}</span>
+      {#if (msg.taskSummary.truncationTokensSaved ?? 0) + (msg.taskSummary.compactionTokensSaved ?? 0) > 0}
+        <span class="opacity-40">·</span>
+        <span>saved {fmtTokens((msg.taskSummary.truncationTokensSaved ?? 0) + (msg.taskSummary.compactionTokensSaved ?? 0))} ctx</span>
+      {/if}
+      {#if (msg.taskSummary.redundantCallsAvoided ?? 0) > 0}
+        <span class="opacity-40">·</span>
+        <span>{msg.taskSummary.redundantCallsAvoided} blocked</span>
+      {/if}
+      {#if (msg.taskSummary.escalations ?? 0) > 0}
+        <span class="opacity-40">·</span>
+        <span class="text-[var(--color-warning)]">{msg.taskSummary.escalations} escalated</span>
+      {/if}
     </div>
   {/if}
 </div>
 
 <style>
+  .reasoning-block {
+    border-left: 2px solid var(--color-accent, #38bdf8);
+    background: rgba(var(--bg-deep-rgb, 10, 12, 20), 0.45);
+    border-radius: 0 6px 6px 0;
+    overflow: hidden;
+  }
+  .reasoning-header {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    width: 100%;
+    padding: 0.3rem 0.55rem;
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-accent, #38bdf8);
+    opacity: 0.85;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    user-select: none;
+  }
+  .reasoning-header:hover { opacity: 1; }
+  .reasoning-body {
+    padding: 0.4rem 0.6rem 0.5rem;
+    font-size: 0.6875rem;
+    line-height: 1.5;
+    font-family: var(--font-mono, monospace);
+    color: var(--color-text, #c9d1d9);
+    opacity: 0.62;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .status-pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    flex-shrink: 0;
+    background: var(--color-accent, #38bdf8);
+    box-shadow: 0 0 6px var(--color-accent, #38bdf8);
+    animation: status-pulse 1.1s ease-in-out infinite;
+  }
+  @keyframes status-pulse {
+    0%, 100% { opacity: 0.35; transform: scale(0.85); }
+    50% { opacity: 1; transform: scale(1.15); }
+  }
   .task-footer-status {
     text-transform: uppercase;
     font-weight: 700;

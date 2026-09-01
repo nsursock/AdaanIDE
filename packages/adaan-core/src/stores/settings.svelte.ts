@@ -107,6 +107,26 @@ class SettingsStore {
     this.update({ openrouterApiKey: key });
   }
 
+  setRoutingMode(mode: "auto" | "manual") {
+    this.update({ routingMode: mode });
+  }
+
+  setRoutingThreshold(n: number) {
+    this.update({ routingThreshold: n });
+  }
+
+  setRoutingTiers(tiers: ("free" | "mid" | "frontier")[]) {
+    this.update({ routingTiers: tiers });
+  }
+
+  setLearningEnabled(b: boolean) {
+    this.update({ learningEnabled: b });
+  }
+
+  setExplorationPaidEnabled(b: boolean) {
+    this.update({ explorationPaidEnabled: b });
+  }
+
   reset() {
     this.settings = { ...DEFAULT_SETTINGS };
     this.persist();
