@@ -1,14 +1,15 @@
 <script lang="ts">
   import { createEventDispatcher, onMount, onDestroy } from "svelte";
-  import { workspaceStore, THEMES } from "@adaan/core";
+  import { workspaceStore, THEMES, diffStats, type DiffLine } from "@adaan/core";
   import { EditorState, Compartment, StateEffect, StateField } from "@codemirror/state";
-  import { EditorView, keymap, Decoration, type DecorationSet } from "@codemirror/view";
+  import { EditorView, keymap, Decoration, WidgetType, type DecorationSet } from "@codemirror/view";
   import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
   import { python } from "@codemirror/lang-python";
   import { javascript } from "@codemirror/lang-javascript";
   import { syntaxHighlighting, HighlightStyle } from "@codemirror/language";
   import { tags } from "@lezer/highlight";
   import { themeStore } from "@adaan/core";
+  import HistoryPanel from "./HistoryPanel.svelte";
   import {
     IconCode,
     IconFileCode,
@@ -17,9 +18,13 @@
     IconAlertCircle,
     IconSparkles,
     IconKeyboard,
+    IconPlus,
+    IconMinus,
+    IconX,
   } from "@tabler/icons-svelte";
 
   const dispatch = createEventDispatcher();
+  let { workspaceRoot }: { workspaceRoot: string | null } = $props();
 
   let editorDiv: HTMLDivElement;
   let view: EditorView | null = null;
@@ -48,6 +53,62 @@
         return Decoration.set(decos, true);
       }
       // Clear decorations on doc change
+      if (tr.docChanged) return Decoration.none;
+      return deco;
+    },
+    provide: (f) => EditorView.decorations.from(f),
+  });
+
+  // --- Persistent add/modify/remove diff highlight, shown until the user
+  // Accepts or Rejects the agent's change (unlike the transient flash above). ---
+  class RemovedLineWidget extends WidgetType {
+    text: string;
+    constructor(text: string) {
+      super();
+      this.text = text;
+    }
+    eq(other: RemovedLineWidget) {
+      return other.text === this.text;
+    }
+    toDOM() {
+      const div = document.createElement("div");
+      div.className = "cm-diff-remove-widget";
+      div.textContent = this.text.length > 0 ? this.text : " ";
+      return div;
+    }
+    get estimatedHeight() {
+      return 21;
+    }
+  }
+
+  function buildDiffDecorations(diff: DiffLine[], state: EditorState) {
+    const decos: any[] = [];
+    const lastLine = state.doc.lines;
+    for (const d of diff) {
+      if (d.type === "add" && d.newLine !== undefined) {
+        const line = state.doc.line(Math.min(d.newLine, lastLine));
+        decos.push(Decoration.line({ class: "cm-diff-add" }).range(line.from));
+      } else if (d.type === "modify" && d.newLine !== undefined) {
+        const line = state.doc.line(Math.min(d.newLine, lastLine));
+        decos.push(Decoration.line({ class: "cm-diff-modify" }).range(line.from));
+      } else if (d.type === "remove") {
+        const anchorNum = Math.min(Math.max(d.newLine ?? 1, 1), lastLine);
+        const anchor = state.doc.line(anchorNum);
+        decos.push(
+          Decoration.widget({ widget: new RemovedLineWidget(d.content), side: -1, block: true }).range(anchor.from)
+        );
+      }
+    }
+    return Decoration.set(decos, true);
+  }
+
+  const diffEffect = StateEffect.define<DiffLine[]>();
+
+  const diffField = StateField.define<DecorationSet>({
+    create: () => Decoration.none,
+    update: (deco, tr) => {
+      const effect = tr.effects.find((e) => e.is(diffEffect));
+      if (effect) return buildDiffDecorations(effect.value, tr.state);
       if (tr.docChanged) return Decoration.none;
       return deco;
     },
@@ -163,6 +224,7 @@
         langCompartment.of(getLangExtension(path)),
         themeCompartment.of([syntaxHighlighting(getHighlightStyle()), getEditorTheme()]),
         flashField,
+        diffField,
         EditorView.lineWrapping,
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
@@ -236,11 +298,74 @@
     view.dispatch({ effects: flashEffect.of(signal.changedLines) });
   });
 
+  // Render persistent add/modify/remove diff decorations while the active
+  // tab has a pending (un-reviewed) agent edit. Cleared on Accept/Reject.
+  $effect(() => {
+    const path = workspaceStore.activeTabPath;
+    const pending = path ? workspaceStore.pendingChanges[path] : undefined;
+    if (!view) return;
+    if (!pending) {
+      view.dispatch({ effects: diffEffect.of([]) });
+      return;
+    }
+    if (workspaceStore.activeTabPath !== pending.path) return;
+    view.dispatch({ effects: diffEffect.of(pending.diff) });
+  });
+
   onDestroy(() => {
     if (view) view.destroy();
   });
 
   const pathParts = $derived(workspaceStore.activeTab?.path.split("/").filter(Boolean) || []);
+
+  // --- Accept / Reject handlers ---
+  // Accept = drop the pending entry; the agent-written content already on
+  // disk stays. Reject = write the pre-agent content back to disk, then drop
+  // the pending entry. Both bubble a "save" up to the parent so the tab's
+  // hash is refreshed and the editor re-syncs.
+  async function acceptChange(path: string) {
+    workspaceStore.acceptChange(path);
+    // No disk write needed — the current content is already the accepted one.
+    // Refresh the tab's hash from disk in case it drifted.
+    const tab = workspaceStore.openTabs.find((t) => t.path === path);
+    if (tab) dispatch("save", { path, content: tab.content, hash: tab.hash });
+  }
+
+  async function rejectChange(path: string) {
+    const pending = workspaceStore.pendingChanges[path];
+    if (!pending) return;
+    // Write the pre-agent content back. expectedHash = the agent-written
+    // hash (the current on-disk hash), so the optimistic-concurrency check
+    // in writeFile passes.
+    dispatch("save", { path, content: pending.beforeContent, hash: pending.afterHash });
+    // Update the tab to the reverted content and drop the pending entry.
+    const tab = workspaceStore.openTabs.find((t) => t.path === path);
+    if (tab) {
+      tab.content = pending.beforeContent;
+      tab.hash = pending.beforeHash;
+      tab.dirty = false;
+    }
+    workspaceStore.acceptChange(path); // removes the pending entry
+  }
+
+  async function acceptAll() {
+    for (const path of Object.keys(workspaceStore.pendingChanges)) {
+      await acceptChange(path);
+    }
+    workspaceStore.acceptAllChanges();
+  }
+
+  async function rejectAll() {
+    for (const path of Object.keys(workspaceStore.pendingChanges)) {
+      await rejectChange(path);
+    }
+  }
+
+  const activePending = $derived(
+    workspaceStore.activeTabPath ? workspaceStore.pendingChanges[workspaceStore.activeTabPath] : undefined,
+  );
+  const activeStats = $derived(activePending ? diffStats(activePending.diff) : null);
+  const anyPending = $derived(workspaceStore.hasPendingChanges);
 </script>
 
 <div class="flex-1 flex flex-col overflow-hidden relative">
@@ -272,6 +397,63 @@
       </div>
     </div>
   {/if}
+
+  <!-- Pending-change review toolbar: per-file Accept/Reject + Accept All -->
+  {#if activePending && activeStats}
+    <div class="diff-review-bar">
+      <div class="flex items-center gap-2 min-w-0">
+        <span class="diff-badge add"><IconPlus size={11} /> +{activeStats.added}</span>
+        <span class="diff-badge modify">~{activeStats.modified}</span>
+        <span class="diff-badge remove"><IconMinus size={11} /> −{activeStats.removed}</span>
+        <span class="diff-review-label">Agent edit — review &amp; accept or reject</span>
+      </div>
+      <div class="flex items-center gap-1.5 flex-shrink-0">
+        <button class="diff-btn reject" onclick={() => rejectChange(activePending.path)} title="Revert this file to its pre-agent content">
+          <IconX size={12} /> Reject
+        </button>
+        <button class="diff-btn accept" onclick={() => acceptChange(activePending.path)} title="Keep the agent's changes to this file">
+          <IconCheck size={12} /> Accept
+        </button>
+      </div>
+    </div>
+  {/if}
+  {#if anyPending && !activePending}
+    <!-- Other files have pending changes but the active tab doesn't —
+         show a slim global bar so Accept All / Reject All are reachable. -->
+    <div class="diff-review-bar slim">
+      <div class="flex items-center gap-2 min-w-0">
+        <span class="diff-review-label">{workspaceStore.pendingChangeCount} file{workspaceStore.pendingChangeCount === 1 ? '' : 's'} with unreviewed agent edits</span>
+      </div>
+      <div class="flex items-center gap-1.5 flex-shrink-0">
+        <button class="diff-btn reject" onclick={rejectAll} title="Revert all agent edits across all files">
+          <IconX size={12} /> Reject All
+        </button>
+        <button class="diff-btn accept" onclick={acceptAll} title="Keep all agent edits across all files">
+          <IconCheck size={12} /> Accept All
+        </button>
+      </div>
+    </div>
+  {/if}
+  {#if activePending && anyPending && workspaceStore.pendingChangeCount > 1}
+    <!-- Active file has a pending change AND other files do too — append
+         Accept All / Reject All next to the per-file buttons. -->
+    <div class="diff-review-bar slim">
+      <div class="flex items-center gap-2 min-w-0">
+        <span class="diff-review-label">{workspaceStore.pendingChangeCount - 1} other file{workspaceStore.pendingChangeCount - 1 === 1 ? '' : 's'} with unreviewed edits</span>
+      </div>
+      <div class="flex items-center gap-1.5 flex-shrink-0">
+        <button class="diff-btn reject" onclick={rejectAll} title="Revert all agent edits across all files">
+          <IconX size={12} /> Reject All
+        </button>
+        <button class="diff-btn accept" onclick={acceptAll} title="Keep all agent edits across all files">
+          <IconCheck size={12} /> Accept All
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  <!-- File version history (local GitHub-style timeline) -->
+  <HistoryPanel {workspaceRoot} />
 
   <!-- Editor Container -->
   <div class="flex-1 overflow-hidden relative" bind:this={editorDiv}>

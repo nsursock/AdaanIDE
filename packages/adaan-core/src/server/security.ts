@@ -23,6 +23,7 @@ export const PROTECTED_DIRS = new Set([
   ".turbo",
   ".cache",
   ".adaan-trash",
+  ".adaan",
   ".DS_Store",
 ]);
 

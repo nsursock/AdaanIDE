@@ -268,7 +268,7 @@
     <div class="editor-col flex-1 flex flex-col overflow-hidden gap-1 min-w-0">
       <main class="panel-enter pane pane-bracketed flex-1 flex flex-col overflow-hidden rounded-lg">
         <Tabs on:close={(e) => workspaceStore.closeTab(e.detail)} />
-        <Editor on:save={(e) => saveFile(e.detail.path, e.detail.content, e.detail.hash)} />
+        <Editor {workspaceRoot} on:save={(e) => saveFile(e.detail.path, e.detail.content, e.detail.hash)} />
       </main>
       {#if showTerminal && settingsStore.settings.terminalMode === "editor"}
         <button

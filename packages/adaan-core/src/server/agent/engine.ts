@@ -168,6 +168,11 @@ export class AgentEngine {
                 yield emit("model.used", { modelId: data.model, modelName: data.model });
                 break;
               }
+              case "model.fallback": {
+                const data = event.data as { from: string; to: string; reason: string };
+                yield emit("model.fallback", data);
+                break;
+              }
               case "error": {
                 if (session.isCancelled()) {
                   yield emit("cancelled");

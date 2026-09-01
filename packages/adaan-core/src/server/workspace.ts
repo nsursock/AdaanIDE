@@ -6,6 +6,7 @@ import { exec as execCb } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import type { FileNode, FileContent, SearchResult } from "../types.js";
+import { FileHistory } from "./file-history.js";
 import {
   safeResolve,
   checkSymlinkEscape,
@@ -36,6 +37,8 @@ export class Workspace {
   readonly rootPath: string;
   readonly name: string;
   readonly security: SecurityOptions;
+  /** Local version history — snapshots every file version for undo/restore. */
+  readonly history: FileHistory;
 
   constructor(rootPath: string, opts?: Partial<SecurityOptions>) {
     // Resolve root path, following symlinks (e.g. /var -> /private/var on macOS)
@@ -43,6 +46,7 @@ export class Workspace {
     this.rootPath = fssync.realpathSync(path.resolve(rootPath));
     this.name = path.basename(this.rootPath);
     this.security = { ...DEFAULT_SECURITY, ...opts };
+    this.history = new FileHistory(this.rootPath);
   }
 
   // --- Path resolution -------------------------------------------------------
@@ -171,7 +175,11 @@ export class Workspace {
     return {
       ...full,
       content: slice,
-      hash: sha256(slice),
+      // Keep the FULL file hash so the caller can use it as expectedHash
+      // for apply_patch / write_file. Returning the slice hash here would
+      // cause every subsequent patch to fail with "Hash mismatch" because
+      // applyPatch computes sha256 of the entire file, not the slice.
+      hash: full.hash,
       lineStart: start + 1,
       lineEnd: end,
     };
@@ -179,8 +187,13 @@ export class Workspace {
 
   // --- File write ------------------------------------------------------------
 
-  async writeFile(input: string, content: string, expectedHash?: string): Promise<{ hash: string; path: string }> {
+  async writeFile(
+    input: string,
+    content: string,
+    expectedHash?: string,
+  ): Promise<{ hash: string; path: string; previousContent?: string }> {
     const abs = this.resolve(input);
+    let previousContent: string | undefined;
 
     // If file exists, check hash for optimistic concurrency
     if (expectedHash !== undefined) {
@@ -197,6 +210,9 @@ export class Workspace {
         (err as any).status = 409;
         throw err;
       }
+      // Keep the pre-write content so callers (the editor's diff/Accept-Reject
+      // UI) can show what changed and revert to it if the user rejects.
+      previousContent = existing;
     } else {
       // If file exists and no hash provided, reject (require hash for existing files)
       try {
@@ -214,13 +230,21 @@ export class Workspace {
     }
 
     await fs.mkdir(path.dirname(abs), { recursive: true });
+    // Snapshot the pre-write version for local history (undo/restore).
+    if (previousContent !== undefined) {
+      await this.history.snapshot(input, previousContent, "user", "write_file");
+    }
     await fs.writeFile(abs, content, "utf-8");
-    return { hash: sha256(content), path: this.relative(abs) };
+    return { hash: sha256(content), path: this.relative(abs), previousContent };
   }
 
   // --- Patch (diff-match-patch) ----------------------------------------------
 
-  async applyPatch(input: string, patch: string, expectedHash: string): Promise<{ hash: string; path: string; applied: boolean }> {
+  async applyPatch(
+    input: string,
+    patch: string,
+    expectedHash: string,
+  ): Promise<{ hash: string; path: string; applied: boolean; previousContent: string }> {
     const abs = this.resolve(input);
     const existing = await fs.readFile(abs, "utf-8").catch(() => {
       throw new Error(`File not found for patching: ${input}`);
@@ -242,8 +266,20 @@ export class Workspace {
       throw new Error(`Failed to apply patch: ${result.error}`);
     }
 
+    // Belt-and-suspenders: if the patch produced identical content, the
+    // SEARCH block matched but REPLACE was the same text, or all blocks
+    // were no-ops. Don't write or report success — the caller needs to know
+    // nothing changed.
+    if (result.content === existing) {
+      throw new Error(
+        `Patch produced no changes — the file content is identical before and after. Check that the REPLACE section actually differs from the SEARCH section.`,
+      );
+    }
+
+    // Snapshot the pre-patch version for local history (undo/restore).
+    await this.history.snapshot(input, existing, "agent", "apply_patch");
     await fs.writeFile(abs, result.content, "utf-8");
-    return { hash: sha256(result.content), path: this.relative(abs), applied: true };
+    return { hash: sha256(result.content), path: this.relative(abs), applied: true, previousContent: existing };
   }
 
   // --- Create ----------------------------------------------------------------
@@ -616,7 +652,8 @@ interface PatchResult {
 /**
  * Apply a simple patch format. Supports:
  * - "SEARCH\n<lines>\nREPLACE\n<lines>" blocks
- * - Multiple SEARCH/REPLACE blocks separated by "---"
+ * - "### SEARCH" / "### REPLACE" markers (commonly emitted by LLMs)
+ * - Multiple SEARCH/REPLACE blocks separated by "---" or longer dash lines
  *
  * Matching strategy:
  * 1. Exact substring match (fast path).
@@ -627,7 +664,12 @@ interface PatchResult {
  */
 function applySimplePatch(original: string, patch: string): PatchResult {
   let content = original;
-  const blocks = patch.split(/\n---\n/);
+  // Split on lines consisting of 3+ dashes (the block separator). Models
+  // emit anywhere from "---" to "------------------------------" — all should
+  // be treated as block boundaries.
+  const blocks = patch.split(/\n-{3,}\n/);
+
+  let blocksApplied = 0;
 
   for (const block of blocks) {
     const lines = block.split("\n");
@@ -636,18 +678,29 @@ function applySimplePatch(original: string, patch: string): PatchResult {
     let replaceLines: string[] = [];
 
     for (const line of lines) {
-      if (line === "SEARCH") {
+      // Recognize both "SEARCH" and "### SEARCH" (and similar prefixes)
+      // as markers. LLMs commonly emit the "### " prefix.
+      if (line === "SEARCH" || line === "### SEARCH") {
         state = "search";
         searchLines = [];
-      } else if (line === "REPLACE") {
+      } else if (line === "REPLACE" || line === "### REPLACE") {
         state = "replace";
         replaceLines = [];
+      } else if (/^-{3,}$/.test(line)) {
+        // Dash-only separator lines (e.g. trailing "------------------------------"
+        // at the end of the patch with no following newline) — skip them
+        // so they don't leak into search/replace content.
+        continue;
       } else if (state === "search") {
         searchLines.push(line);
       } else if (state === "replace") {
         replaceLines.push(line);
       }
     }
+
+    // Skip blocks that had no SEARCH marker at all (e.g. leading/trailing
+    // dash-separator lines that produced empty or header-only blocks).
+    if (state === "none" && searchLines.length === 0) continue;
 
     if (searchLines.length === 0) continue;
 
@@ -670,6 +723,7 @@ function applySimplePatch(original: string, patch: string): PatchResult {
     //    (String.replace with a string 2nd arg treats $&, $`, $', $$, $1… specially).
     if (content.includes(searchText)) {
       content = content.replace(searchText, () => replaceText);
+      blocksApplied++;
       continue;
     }
 
@@ -677,6 +731,7 @@ function applySimplePatch(original: string, patch: string): PatchResult {
     const fuzzy = fuzzyReplace(content, searchText, replaceText);
     if (fuzzy.matched) {
       content = fuzzy.content;
+      blocksApplied++;
       continue;
     }
 
@@ -684,6 +739,18 @@ function applySimplePatch(original: string, patch: string): PatchResult {
       success: false,
       content,
       error: `SEARCH block not found:\n${searchText.slice(0, 200)}...`,
+    };
+  }
+
+  // If no blocks were applied (all were skipped due to unrecognized markers
+  // or empty search sections), fail loudly instead of silently returning the
+  // original content unchanged — a no-op "success" is the worst possible
+  // outcome because the caller believes the file was edited.
+  if (blocksApplied === 0) {
+    return {
+      success: false,
+      content,
+      error: `No valid SEARCH/REPLACE blocks were found in the patch. Ensure each block uses "### SEARCH" / "### REPLACE" (or "SEARCH" / "REPLACE") markers and block separators are lines of dashes (---). Patch preview:\n${patch.slice(0, 300)}...`,
     };
   }
 

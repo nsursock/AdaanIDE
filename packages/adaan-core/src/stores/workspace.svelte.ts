@@ -1,4 +1,5 @@
 import type { FileNode, WorkspaceInfo } from "../types.js";
+import { computeLineDiff, type DiffLine } from "../diff.js";
 
 export interface OpenTab {
   path: string;
@@ -20,6 +21,22 @@ export interface PatchSignal {
   timestamp: number;
 }
 
+/**
+ * An agent-made edit to a file that hasn't been reviewed yet. `beforeContent`
+ * is the content that was on disk before the FIRST edit this turn made to
+ * this file (kept stable across multiple patches in the same turn so
+ * rejecting restores the pre-agent version, not just the last patch).
+ */
+export interface PendingFileChange {
+  path: string;
+  beforeContent: string;
+  beforeHash: string;
+  afterContent: string;
+  afterHash: string;
+  diff: DiffLine[];
+  timestamp: number;
+}
+
 class WorkspaceStore {
   workspace = $state<WorkspaceInfo | null>(null);
   tree = $state<FileNode[]>([]);
@@ -29,6 +46,8 @@ class WorkspaceStore {
   showHidden = $state(false);
   /** Fired when the agent patches/writes a file — Editor watches this. */
   patchSignal = $state<PatchSignal | null>(null);
+  /** Agent edits awaiting Accept/Reject, keyed by file path. */
+  pendingChanges = $state<Record<string, PendingFileChange>>({});
 
   get activeTab(): OpenTab | null {
     if (!this.activeTabPath) return null;
@@ -101,12 +120,59 @@ class WorkspaceStore {
     return this.openTabs.find((t) => t.path === path)?.dirty ?? false;
   }
 
+  get pendingChangeCount(): number {
+    return Object.keys(this.pendingChanges).length;
+  }
+
+  get hasPendingChanges(): boolean {
+    return this.pendingChangeCount > 0;
+  }
+
+  /**
+   * Record an agent-made edit to `path` (from apply_patch / write_file) so
+   * the editor can render add/modify/remove highlights and the user can
+   * Accept or Reject it. If this file already has a pending change from
+   * earlier in the same turn, its original `beforeContent`/`beforeHash` is
+   * kept so Reject restores the version before ANY of the agent's edits
+   * this turn, not just the most recent one.
+   */
+  recordFileChange(path: string, beforeContent: string, beforeHash: string, afterContent: string, afterHash: string) {
+    const existing = this.pendingChanges[path];
+    const baseBeforeContent = existing?.beforeContent ?? beforeContent;
+    const baseBeforeHash = existing?.beforeHash ?? beforeHash;
+    this.pendingChanges = {
+      ...this.pendingChanges,
+      [path]: {
+        path,
+        beforeContent: baseBeforeContent,
+        beforeHash: baseBeforeHash,
+        afterContent,
+        afterHash,
+        diff: computeLineDiff(baseBeforeContent, afterContent),
+        timestamp: Date.now(),
+      },
+    };
+  }
+
+  /** Keep the current (agent-written) version of `path` and stop reviewing it. */
+  acceptChange(path: string) {
+    if (!(path in this.pendingChanges)) return;
+    const { [path]: _removed, ...rest } = this.pendingChanges;
+    this.pendingChanges = rest;
+  }
+
+  /** Keep every pending agent edit. */
+  acceptAllChanges() {
+    this.pendingChanges = {};
+  }
+
   close() {
     this.workspace = null;
     this.tree = [];
     this.openTabs = [];
     this.activeTabPath = null;
     this.showHidden = false;
+    this.pendingChanges = {};
   }
 }
 

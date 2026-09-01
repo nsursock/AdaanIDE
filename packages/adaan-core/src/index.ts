@@ -30,9 +30,14 @@ export type {
 // Themes
 export { THEMES, DEFAULT_THEME, THEME_IDS, getTheme, themeCSSVars } from "./themes.js";
 
+// Diff (line-level add/modify/remove classification for the editor's
+// Accept/Reject review UI)
+export { computeLineDiff, changedNewLines, diffStats } from "./diff.js";
+export type { DiffOpType, DiffLine, DiffStats } from "./diff.js";
+
 // Stores (client-safe)
 export { themeStore, workspaceStore, chatStore, settingsStore } from "./stores/index.js";
-export type { OpenTab, ChatMessageEntry, Settings } from "./stores/index.js";
+export type { OpenTab, PatchSignal, PendingFileChange, ChatMessageEntry, Settings } from "./stores/index.js";
 export {
   SCHEMA_VERSION,
   STORAGE_KEY,

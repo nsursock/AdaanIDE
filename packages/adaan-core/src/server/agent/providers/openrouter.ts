@@ -21,13 +21,18 @@ const STREAM_IDLE_TIMEOUT_MS = 45_000;
 
 /**
  * Default free model pool for rotation.
- * These are free, tool-capable models on OpenRouter.
+ * These are free, tool-capable models on OpenRouter, sourced from the live
+ * /models catalog. The free-tier lineup churns often — the live catalog is
+ * always preferred for failover (see chat()), so this pool is only a
+ * zero-network-latency fallback when the catalog endpoint is unreachable.
+ * Stale entries here are harmless: they 404 and get skipped.
  */
 export const DEFAULT_FREE_POOL: string[] = [
-  "deepseek/deepseek-r1:free",
-  "qwen/qwen-2.5-coder-32b-instruct:free",
-  "meta-llama/llama-3.3-70b-instruct:free",
-  "google/gemini-2.0-flash-exp:free",
+  "z-ai/glm-5.2:free",
+  "cohere/north-mini-code:free",
+  "minimax/minimax-m3:free",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "google/gemma-4-31b-it:free",
 ];
 
 /** Extra failover attempts sourced from the live /models catalog once the
@@ -40,6 +45,15 @@ const LIVE_MODELS_CACHE_TTL_MS = 5 * 60_000;
 /** Timeout for the /models catalog fetch — must not hang a chat turn. */
 const LIST_MODELS_TIMEOUT_MS = 8_000;
 
+/**
+ * Before abandoning the user's explicitly-selected model for a different
+ * free model, give it one short retry with backoff. Free-tier 429/503s are
+ * frequently per-minute and clear within a couple of seconds, so bailing to
+ * an unrelated model (e.g. from GLM to Cohere) on the very first hiccup
+ * surprises users who deliberately picked a specific model.
+ */
+const SAME_MODEL_RETRY_DELAY_MS = 1_500;
+
 interface OpenRouterProviderOptions {
   apiKey: string;
   baseUrl?: string;
@@ -47,6 +61,8 @@ interface OpenRouterProviderOptions {
   siteUrl?: string;
   siteName?: string;
   idleTimeoutMs?: number;
+  /** Backoff before retrying the same model on a transient 429/503. */
+  retryDelayMs?: number;
 }
 
 export class OpenRouterProvider implements LLMProvider {
@@ -56,6 +72,7 @@ export class OpenRouterProvider implements LLMProvider {
   private siteUrl: string;
   private siteName: string;
   private idleTimeoutMs: number;
+  private retryDelayMs: number;
   private lastUsed: Map<string, number> = new Map(); // model -> timestamp (for LRU)
   private liveFreeModelsCache: { ids: string[]; fetchedAt: number } | null = null;
 
@@ -66,6 +83,7 @@ export class OpenRouterProvider implements LLMProvider {
     this.siteUrl = opts.siteUrl ?? "http://localhost";
     this.siteName = opts.siteName ?? "AdaanIDE";
     this.idleTimeoutMs = opts.idleTimeoutMs ?? STREAM_IDLE_TIMEOUT_MS;
+    this.retryDelayMs = opts.retryDelayMs ?? SAME_MODEL_RETRY_DELAY_MS;
   }
 
   /**
@@ -120,6 +138,11 @@ export class OpenRouterProvider implements LLMProvider {
   ): AsyncIterable<ProviderEvent> {
     const initialModel = options.model;
     const tried = new Set<string>([initialModel]);
+    // Models we've already given a same-model retry to (one per model). A
+    // free-tier 429/503 is often a per-minute limit that clears in a second
+    // or two, so before abandoning the user's deliberately-chosen model for
+    // an unrelated one, give it a single backoff retry.
+    const retried = new Set<string>();
     let currentModel = initialModel;
     // Budget: every model in the static pool, plus a handful of extra
     // attempts sourced from the live /models catalog (models come and go on
@@ -135,7 +158,6 @@ export class OpenRouterProvider implements LLMProvider {
         yield* this.doChatRequest(messages, { ...options, model: currentModel });
         return;
       } catch (e: any) {
-        attempts++;
         const statusCode = e.statusCode ?? e.status;
         // 429/503 are rate-limit/overload signals. OpenRouter also returns a
         // 404 when a model slug that was previously free has been withdrawn
@@ -152,6 +174,28 @@ export class OpenRouterProvider implements LLMProvider {
           statusCode === 402 ||
           isModelUnavailableError(statusCode, e.message);
 
+        // Transient overload/rate-limit on a model we haven't retried yet:
+        // try the SAME model once more after a short backoff instead of
+        // immediately jumping to a different model family. 402/404 are not
+        // transient (credits/availability won't change in 1.5s), so those go
+        // straight to failover.
+        const transient = statusCode === 429 || statusCode === 503;
+        if (transient && !retried.has(currentModel)) {
+          retried.add(currentModel);
+          try {
+            await sleep(this.retryDelayMs, options.signal);
+          } catch {
+            // Aborted during backoff — surface as a clean cancel/error.
+            yield {
+              type: "error",
+              data: { message: "Cancelled", statusCode, retryable: false },
+            };
+            return;
+          }
+          continue;
+        }
+
+        attempts++;
         if (!retryable || attempts >= maxAttempts) {
           // If every model we tried was a free-tier slug, the free tier is
           // effectively unavailable right now — let the caller offer the
@@ -170,12 +214,17 @@ export class OpenRouterProvider implements LLMProvider {
           return;
         }
 
-        // Failover to a model we haven't tried yet — first from the static
-        // pool, then from the live catalog if the pool is exhausted.
-        let next = this.freePool.find((m) => !tried.has(m)) ?? null;
-        if (!next && poolEnabled) {
+        // Failover to a model we haven't tried yet. Prefer the LIVE catalog
+        // (always current) over the static pool (may have stale slugs that
+        // just waste a 404 hop). The static pool is a zero-network-latency
+        // fallback for when the catalog endpoint itself is unreachable.
+        let next: string | null = null;
+        if (poolEnabled) {
           const live = await this.getLiveFreeModelIds();
           next = live.find((m) => !tried.has(m)) ?? null;
+        }
+        if (!next) {
+          next = this.freePool.find((m) => !tried.has(m)) ?? null;
         }
 
         if (!next) {
@@ -193,6 +242,12 @@ export class OpenRouterProvider implements LLMProvider {
           return;
         }
 
+        // Surface the switch so the caller/UI can show it instead of
+        // silently labeling the reply with a model the user never picked.
+        yield {
+          type: "model.fallback",
+          data: { from: currentModel, to: next, reason: e.message ?? String(statusCode) },
+        };
         tried.add(next);
         this.lastUsed.set(next, Date.now());
         currentModel = next;
@@ -537,4 +592,23 @@ function mapFinishReason(reason: string): "stop" | "tool_calls" | "length" | "co
     default:
       return "stop";
   }
+}
+
+/**
+ * Resolve after `ms`, unless `signal` aborts first (in which case reject so
+ * the caller can bail out of a backoff when the user cancels the turn).
+ */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new Error("Cancelled"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("Cancelled"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }

@@ -32,6 +32,27 @@
     {/if}
   </div>
 
+  <!-- Model fallback notice — the user's selected model was swapped after
+       a transient failure, so the reply came from a different model. Shows
+       the full cascade chain so the user sees every hop. -->
+  {#if msg.modelFallback && msg.modelFallback.length > 0}
+    <div class="mb-2 p-2 rounded border border-[rgba(255,184,108,0.35)] bg-[rgba(255,184,108,0.07)] flex items-start gap-2 text-[var(--color-warning)] text-[0.6875rem] font-mono">
+      <IconAlertTriangle size={13} class="flex-shrink-0 mt-0.5" />
+      <div class="break-words space-y-0.5">
+        <div>
+          Model fell back: {msg.modelFallback[0].from} → {msg.modelFallback[msg.modelFallback.length - 1].to}
+        </div>
+        {#if msg.modelFallback.length > 1}
+          <div class="opacity-70 text-[0.625rem]">
+            {#each msg.modelFallback as hop, i}
+              <span>{i > 0 ? ' → ' : ''}{hop.to}</span>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   <!-- Content -->
   {#if msg.content}
     <div class="text-[0.8125rem] whitespace-pre-wrap break-words leading-relaxed font-mono opacity-95">

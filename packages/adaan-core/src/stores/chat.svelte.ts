@@ -18,6 +18,12 @@ export interface ChatMessageEntry {
   modelUsed?: string;
   timestamp: number;
   error?: string;
+  /** Set when the provider had to fall back from the user's selected model
+   *  to a different one (e.g. free-tier 429 after retry). Shown in the UI so
+   *  the swap is visible rather than silently mislabeling the reply. Each
+   *  hop in the cascade is appended, so the user sees the full chain:
+   *  selected → ... → final. */
+  modelFallback?: Array<{ from: string; to: string; reason: string }>;
   /** Set when every free model we tried for this turn is currently
    *  unavailable — the UI should offer to retry with a paid model. */
   freeModelsExhausted?: { message: string; triedModels: string[] };
@@ -201,6 +207,14 @@ class ChatStore {
         lines.push("");
         lines.push(`  [ERROR]: ${msg.error}`);
       }
+      if (msg.modelFallback && msg.modelFallback.length > 0) {
+        lines.push("");
+        const chain = [msg.modelFallback[0].from, ...msg.modelFallback.map((h) => h.to)];
+        lines.push(`  [FELL BACK]: ${chain.join(" -> ")}`);
+        for (const hop of msg.modelFallback) {
+          lines.push(`    ${hop.from} -> ${hop.to}: ${hop.reason}`);
+        }
+      }
       if (msg.freeModelsExhausted) {
         lines.push("");
         lines.push(`  [FREE MODELS EXHAUSTED]: ${msg.freeModelsExhausted.message}`);
@@ -223,6 +237,15 @@ class ChatStore {
       case "model.used": {
         const data = event.data as { modelId: string };
         this.setAssistantModel(assistantId, data.modelId);
+        break;
+      }
+      case "model.fallback": {
+        const data = event.data as { from: string; to: string; reason: string };
+        const msg = this.messages.find((m) => m.id === assistantId);
+        if (msg) {
+          if (!msg.modelFallback) msg.modelFallback = [];
+          msg.modelFallback.push(data);
+        }
         break;
       }
       case "tool.start": {

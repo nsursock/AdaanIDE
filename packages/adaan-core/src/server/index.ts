@@ -1,4 +1,6 @@
 export { Workspace } from "./workspace.js";
+export { FileHistory } from "./file-history.js";
+export type { HistoryEntry, HistoryListEntry } from "./file-history.js";
 export {
   safeResolve,
   checkSymlinkEscape,

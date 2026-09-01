@@ -98,6 +98,7 @@ export type AgentEventType =
   | "tool.cache_hit"
   | "context.pruned"
   | "model.used"
+  | "model.fallback"
   | "model.free_exhausted"
   | "done"
   | "error"
@@ -155,6 +156,12 @@ export interface ContextPrunedData {
 export interface ModelUsedData {
   modelId: string;
   modelName: string;
+}
+
+export interface ModelFallbackData {
+  from: string;
+  to: string;
+  reason: string;
 }
 
 export interface ErrorData {
@@ -215,6 +222,7 @@ export type ProviderEventType =
   | "tool_call.args.delta"
   | "tool_call.complete"
   | "finish"
+  | "model.fallback"
   | "error";
 
 export interface ProviderEvent {

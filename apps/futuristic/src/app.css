@@ -261,6 +261,99 @@ html, body {
   animation: flash-line-pulse 2.5s ease-out;
 }
 
+/* Persistent diff highlights for unreviewed agent edits (Accept/Reject) */
+.cm-diff-add {
+  background: rgba(80, 200, 120, 0.14);
+  box-shadow: inset 3px 0 0 rgba(80, 200, 120, 0.7);
+}
+.cm-diff-modify {
+  background: rgba(255, 184, 108, 0.14);
+  box-shadow: inset 3px 0 0 rgba(255, 184, 108, 0.7);
+}
+.cm-diff-remove-widget {
+  background: rgba(255, 85, 85, 0.12);
+  box-shadow: inset 3px 0 0 rgba(255, 85, 85, 0.7);
+  color: rgba(255, 120, 120, 0.85);
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 85, 85, 0.5);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* Review toolbar (Accept / Reject agent edits) */
+.diff-review-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.35rem 0.85rem;
+  font-size: 0.6875rem;
+  border-bottom: 1px solid rgba(var(--muted-rgb), 0.15);
+  background: rgba(var(--bg-deep-rgb), 0.5);
+  z-index: 11;
+}
+.diff-review-bar.slim {
+  padding: 0.25rem 0.85rem;
+  background: rgba(var(--bg-deep-rgb), 0.35);
+}
+.diff-review-label {
+  color: var(--color-muted);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.diff-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 0.625rem;
+  letter-spacing: 0.02em;
+}
+.diff-badge.add    { background: rgba(80, 200, 120, 0.15); color: rgb(120, 220, 150); }
+.diff-badge.modify { background: rgba(255, 184, 108, 0.15); color: rgb(255, 200, 130); }
+.diff-badge.remove { background: rgba(255, 85, 85, 0.15); color: rgb(255, 130, 130); }
+
+.diff-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 5px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.diff-btn.accept {
+  background: rgba(80, 200, 120, 0.15);
+  color: rgb(120, 220, 150);
+  border-color: rgba(80, 200, 120, 0.3);
+}
+.diff-btn.accept:hover {
+  background: rgba(80, 200, 120, 0.25);
+  box-shadow: 0 0 12px rgba(80, 200, 120, 0.3);
+}
+.diff-btn.reject {
+  background: rgba(255, 85, 85, 0.12);
+  color: rgb(255, 130, 130);
+  border-color: rgba(255, 85, 85, 0.3);
+}
+.diff-btn.reject:hover {
+  background: rgba(255, 85, 85, 0.2);
+  box-shadow: 0 0 12px rgba(255, 85, 85, 0.3);
+}
+
 /* Glassmorphism panels */
 .glass {
   background: var(--color-surface);
@@ -1461,10 +1554,26 @@ html, body {
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--color-muted);
-  background: rgba(var(--accent-rgb), 0.08);
+  background: rgb(var(--surface-2-rgb));
   border-bottom: 1px solid var(--color-border);
   position: sticky;
-  top: 0;
+  top: var(--search-h, 0);
+  z-index: 2;
+}
+.model-picker-menu .group-label.free-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  transition: opacity 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+              transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.model-picker-menu .group-label.free-label.gone {
+  opacity: 0;
+  transform: translateY(-60%);
+  pointer-events: none;
+}
+.model-picker-menu .group-label.paid-label {
+  transition: opacity 0.28s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .model-picker-menu .model-item {
   width: 100%;
@@ -1486,6 +1595,40 @@ html, body {
   background: rgba(var(--accent-rgb), 0.15);
   box-shadow: inset 3px 0 0 var(--color-accent);
   color: var(--active-text);
+}
+.model-picker-menu .model-search {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--color-border);
+  background: rgb(var(--surface-2-rgb));
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
+.model-picker-menu .model-search input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--color-text);
+  font-size: 0.75rem;
+  font-family: inherit;
+}
+.model-picker-menu .model-search input::placeholder { color: var(--color-muted); opacity: 0.7; }
+.model-picker-menu .model-search-count {
+  font-size: 0.5625rem;
+  font-family: "JetBrains Mono", monospace;
+  color: var(--color-muted);
+  flex-shrink: 0;
+}
+.model-picker-menu .model-empty {
+  padding: 0.75rem;
+  font-size: 0.75rem;
+  color: var(--color-muted);
+  text-align: center;
 }
 
 /* Theme switcher menu */

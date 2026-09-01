@@ -167,8 +167,9 @@
 
   /**
    * When the agent modifies a file via apply_patch or write_file, reload it
-   * from disk, bring it forward in the editor, and signal which lines changed
-   * so the Editor can flash them.
+   * from disk, bring it forward in the editor, flash the changed lines, and
+   * record a pending add/modify/remove diff so the user can review it and
+   * Accept or Reject the change.
    */
   async function handleAgentFileChange(eventData: { toolName: string; result?: unknown; toolCallId: string }) {
     // The tool result doesn't include the file path directly — we need to
@@ -178,6 +179,11 @@
     const filePath = tc?.args?.path as string | undefined;
     if (!filePath || !workspaceRoot) return;
 
+    // apply_patch / write_file now return the pre-edit content (see
+    // workspace.ts) — that's the authoritative "before" version for the
+    // diff, independent of whether the file happened to already be open.
+    const toolResult = eventData.result as { previousContent?: string; hash?: string } | undefined;
+
     try {
       const res = await fetch(`/api/files/read?root=${encodeURIComponent(workspaceRoot)}&path=${encodeURIComponent(filePath)}`);
       if (!res.ok) return;
@@ -186,8 +192,12 @@
       // Compute changed lines by diffing old content (if tab open) vs new
       let changedLines: number[] = [];
       const existingTab = workspaceStore.openTabs.find((t) => t.path === filePath);
-      if (existingTab) {
-        changedLines = diffLines(existingTab.content, data.content);
+      const beforeContent = toolResult?.previousContent ?? existingTab?.content;
+      // Capture the pre-write hash BEFORE we overwrite the tab below —
+      // reused for recordFileChange's metadata.
+      const beforeHash = workspaceStore.pendingChanges[filePath]?.beforeHash ?? existingTab?.hash ?? "";
+      if (beforeContent !== undefined) {
+        changedLines = diffLines(beforeContent, data.content);
       }
 
       // Update or open the tab with fresh content
@@ -202,6 +212,14 @@
 
       // Signal the editor to flash changed lines
       workspaceStore.signalPatch(filePath, changedLines.length > 0 ? changedLines : allLines(data.content));
+
+      // Record the pending change (add/modify/remove diff) for the review
+      // toolbar — this persists until the user Accepts or Rejects it, unlike
+      // the transient flash above. `create_file` has no previous content, so
+      // there's nothing to review/revert.
+      if (beforeContent !== undefined) {
+        workspaceStore.recordFileChange(filePath, beforeContent, beforeHash, data.content, data.hash);
+      }
     } catch {
       // file may have been deleted — ignore
     }

@@ -1,10 +1,18 @@
 <script lang="ts">
   import type { ModelInfo } from "@adaan/core";
   import { chatStore } from "@adaan/core";
-  import { IconChevronDown, IconCpu, IconSparkles, IconCheck } from "@tabler/icons-svelte";
+  import { IconChevronDown, IconCpu, IconCheck, IconSearch } from "@tabler/icons-svelte";
 
   let { models } = $props<{ models: { free: ModelInfo[]; paid: ModelInfo[] } }>();
   let open = $state(false);
+  let query = $state("");
+  let menuEl = $state<HTMLDivElement | null>(null);
+  let searchEl = $state<HTMLDivElement | null>(null);
+  let freeLabelEl = $state<HTMLDivElement | null>(null);
+  let paidLabelEl = $state<HTMLDivElement | null>(null);
+  /** True once the paid group label reaches the sticky slot — drives the
+   *  free-bar fade-out animation. */
+  let freeBarGone = $state(false);
 
   function select(model: ModelInfo) {
     chatStore.setModel(model);
@@ -16,6 +24,48 @@
     if (ctx >= 1000) return `${Math.round(ctx / 1000)}k`;
     return `${ctx}`;
   }
+
+  function matches(m: ModelInfo): boolean {
+    if (!query) return true;
+    const q = query.toLowerCase();
+    return m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q);
+  }
+
+  const filteredFree = $derived(models.free.filter(matches));
+  const filteredPaid = $derived(models.paid.filter(matches));
+
+  // Keep the search bar pinned, the group labels pinned just below it, and
+  // fade the free label out (with a slide) the moment the paid label arrives
+  // at the sticky slot — i.e. when the user has scrolled past every free model.
+  $effect(() => {
+    const menu = menuEl;
+    const search = searchEl;
+    const paid = paidLabelEl;
+    if (!menu || !search) return;
+
+    const update = () => {
+      // Pin the group labels right beneath the search bar regardless of its
+      // rendered height (font scaling, etc.).
+      menu.style.setProperty("--search-h", `${search.offsetHeight}px`);
+      if (!paid) {
+        freeBarGone = false;
+        return;
+      }
+      const threshold = search.getBoundingClientRect().bottom;
+      // The paid label is sticky at top: var(--search-h). When its top reaches
+      // the search bar's bottom, it has taken the slot — free is done.
+      freeBarGone = paid.getBoundingClientRect().top - threshold < 1;
+    };
+
+    update();
+    menu.addEventListener("scroll", update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(menu);
+    return () => {
+      menu.removeEventListener("scroll", update);
+      ro.disconnect();
+    };
+  });
 </script>
 
 <div class="relative px-2.5 py-1.5 border-b border-[var(--color-border)] bg-[rgba(var(--bg-deep-rgb),0.3)]">
@@ -47,13 +97,26 @@
   {#if open}
     <!-- Click-away backdrop -->
     <div class="fixed inset-0 z-40" onclick={() => open = false} onkeydown={(e) => e.key === "Escape" && (open = false)} role="button" tabindex="-1" aria-label="Close menu"></div>
-    <div class="model-picker-menu absolute left-2.5 right-2.5 top-full mt-1 z-50 max-h-72 overflow-y-auto shadow-2xl">
-      {#if models.free.length > 0}
-        <div class="group-label flex items-center justify-between">
+    <div class="model-picker-menu absolute left-2.5 right-2.5 top-full mt-1 z-50 max-h-80 overflow-y-auto shadow-2xl" bind:this={menuEl}>
+      <div class="model-search" bind:this={searchEl}>
+        <IconSearch size={12} class="text-[var(--color-muted)] flex-shrink-0" />
+        <input
+          type="text"
+          placeholder="Search models…"
+          bind:value={query}
+          onclick={(e) => e.stopPropagation()}
+          onkeydown={(e) => e.stopPropagation()}
+          aria-label="Search models"
+        />
+        <span class="model-search-count">{filteredFree.length + filteredPaid.length}</span>
+      </div>
+
+      {#if filteredFree.length > 0}
+        <div class="group-label free-label {freeBarGone ? 'gone' : ''}" bind:this={freeLabelEl}>
           <span>⟨ Free Tier Models ⟩</span>
           <span class="text-[0.5625rem] font-bold text-[var(--color-success)]">AUTOROTATION</span>
         </div>
-        {#each models.free as model (model.id)}
+        {#each filteredFree as model (model.id)}
           {@const isSelected = chatStore.selectedModel?.id === model.id}
           <button
             class="model-item {isSelected ? 'selected' : ''}"
@@ -82,9 +145,9 @@
         {/each}
       {/if}
 
-      {#if models.paid.length > 0}
-        <div class="group-label">⟨ Paid Tier Models ⟩</div>
-        {#each models.paid.slice(0, 20) as model (model.id)}
+      {#if filteredPaid.length > 0}
+        <div class="group-label paid-label {freeBarGone ? 'active' : ''}" bind:this={paidLabelEl}>⟨ Paid Tier Models ⟩</div>
+        {#each filteredPaid as model (model.id)}
           {@const isSelected = chatStore.selectedModel?.id === model.id}
           <button
             class="model-item {isSelected ? 'selected' : ''}"
@@ -111,6 +174,10 @@
             </div>
           </button>
         {/each}
+      {/if}
+
+      {#if filteredFree.length === 0 && filteredPaid.length === 0}
+        <div class="model-empty">No models match “{query}”.</div>
       {/if}
     </div>
   {/if}

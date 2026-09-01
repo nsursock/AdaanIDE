@@ -18,7 +18,8 @@ before(async () => {
     req.on("data", (c) => (raw += c));
     req.on("end", () => {
       const body = raw ? JSON.parse(raw) : {};
-      seenModels.push(body.model);
+      // Only track chat-completion requests, not /models catalog GETs.
+      if (!req.url?.endsWith("/models")) seenModels.push(body.model);
       handler(req, res, body);
     });
   });
@@ -160,10 +161,14 @@ describe("OpenRouterProvider — SSE streaming", () => {
     assert.ok(elapsed < 5000, `should time out quickly, took ${elapsed}ms`);
   });
 
-  it("fails over to pool model when a non-pool model is rate limited", async () => {
+  it("retries the same model once on a transient 429 before failing over", async () => {
     seenModels.length = 0;
+    let calls = 0;
     handler = (_req, res, body) => {
       if (body.model === "custom/out-of-pool:free") {
+        calls++;
+        // First hit: 429. Second hit (same-model retry): also 429. After that
+        // we fail over to a pool model, which succeeds.
         res.writeHead(429, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "rate limited" }));
         return;
@@ -175,7 +180,7 @@ describe("OpenRouterProvider — SSE streaming", () => {
       setTimeout(() => res.end(), 50);
     };
 
-    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl });
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl, retryDelayMs: 0 });
     const events = await collect(
       provider.chat([{ role: "user", content: "hi" }], { model: "custom/out-of-pool:free", tools: [] }),
     );
@@ -183,8 +188,79 @@ describe("OpenRouterProvider — SSE streaming", () => {
     const types = events.map((e) => e.type);
     assert.ok(types.includes("text.delta"), `expected text after failover, got: ${types.join(",")}`);
     assert.ok(types.includes("finish"));
+    // The selected model is tried twice (initial + same-model retry) before
+    // bailing to the pool.
     assert.equal(seenModels[0], "custom/out-of-pool:free");
+    assert.equal(seenModels[1], "custom/out-of-pool:free");
+    assert.ok(DEFAULT_FREE_POOL.includes(seenModels[2]), `failover should use a pool model, got ${seenModels[2]}`);
+    assert.equal(calls, 2, "selected model should have been hit twice (initial + retry)");
+    // A fallback event must surface the swap so it isn't silent.
+    const fallback = events.find((e) => e.type === "model.fallback");
+    assert.ok(fallback, "expected a model.fallback event");
+    const fb = fallback!.data as { from: string; to: string };
+    assert.equal(fb.from, "custom/out-of-pool:free");
+    assert.ok(DEFAULT_FREE_POOL.includes(fb.to));
+  });
+
+  it("succeeds on the same-model retry without failing over (no fallback event)", async () => {
+    seenModels.length = 0;
+    let calls = 0;
+    handler = (_req, res, body) => {
+      if (body.model === "flaky/model:free") {
+        calls++;
+        if (calls === 1) {
+          // Transient 429 on the first hit only — the retry succeeds.
+          res.writeHead(429, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "rate limited" }));
+          return;
+        }
+      }
+      sse(res, [
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "ok" } }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ]);
+      setTimeout(() => res.end(), 50);
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl, retryDelayMs: 0 });
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "flaky/model:free", tools: [] }),
+    );
+
+    const types = events.map((e) => e.type);
+    assert.ok(types.includes("text.delta"));
+    assert.ok(types.includes("finish"));
+    // Only the selected model was ever hit — no failover.
+    assert.deepEqual(seenModels, ["flaky/model:free", "flaky/model:free"]);
+    assert.ok(!types.includes("model.fallback"), "no fallback event when the retry succeeds");
+  });
+
+  it("fails over immediately on 402 (no same-model retry) and emits fallback", async () => {
+    seenModels.length = 0;
+    handler = (_req, res, body) => {
+      if (body.model === "cohere/north-mini-code:free") {
+        res.writeHead(402, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Insufficient balance", code: 402 } }));
+        return;
+      }
+      sse(res, [
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "hello" } }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ]);
+      setTimeout(() => res.end(), 50);
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl, retryDelayMs: 0 });
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "cohere/north-mini-code:free", tools: [] }),
+    );
+
+    const types = events.map((e) => e.type);
+    assert.ok(types.includes("text.delta"));
+    // 402 is not transient — no same-model retry, straight to the pool.
+    assert.equal(seenModels[0], "cohere/north-mini-code:free");
     assert.ok(DEFAULT_FREE_POOL.includes(seenModels[1]), `failover should use a pool model, got ${seenModels[1]}`);
+    assert.ok(events.some((e) => e.type === "model.fallback"));
   });
 
   it("fails over to pool model when OpenRouter reports the model unavailable for free (404)", async () => {

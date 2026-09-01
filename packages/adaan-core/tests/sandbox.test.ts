@@ -223,6 +223,22 @@ describe("Workspace — read/write", () => {
     assert.equal(content, "print('modified')\n");
   });
 
+  it("writeFile returns previousContent for existing files", async () => {
+    const ws = new Workspace(root);
+    const read = await ws.readFile("hello.py");
+    const result = await ws.writeFile("hello.py", "print('changed')\n", read.hash);
+    assert.equal(result.previousContent, "print('hello')\n",
+      "writeFile must return the pre-write content so the editor can diff/revert");
+    assert.equal(result.hash, read.hash === result.hash ? read.hash : result.hash); // sanity
+  });
+
+  it("writeFile omits previousContent for new files", async () => {
+    const ws = new Workspace(root);
+    const result = await ws.writeFile("brand_new.py", "print('new')\n");
+    assert.equal(result.previousContent, undefined,
+      "create-via-writeFile has no prior content to return");
+  });
+
   it("reads line range", async () => {
     const ws = new Workspace(root);
     await ws.writeFile("multiline.py", "line1\nline2\nline3\nline4\nline5\n");
@@ -230,6 +246,24 @@ describe("Workspace — read/write", () => {
     assert.equal(result.content, "line2\nline3\nline4");
     assert.equal(result.lineStart, 2);
     assert.equal(result.lineEnd, 4);
+  });
+
+  it("range read returns full-file hash usable as expectedHash for apply_patch", async () => {
+    const ws = new Workspace(root);
+    await ws.writeFile("multiline.py", "line1\nline2\nline3\nline4\nline5\n");
+    // Read a range — the returned hash must be the full file hash, not the
+    // slice hash, otherwise apply_patch will always fail with "Hash mismatch".
+    const range = await ws.readFileRange("multiline.py", 2, 4);
+    const full = await ws.readFile("multiline.py");
+    assert.equal(range.hash, full.hash, "range hash must equal full file hash");
+
+    // The range hash must work as expectedHash for a patch targeting content
+    // outside the read range (proving it's the full-file hash, not slice hash).
+    const patch = "SEARCH\nline1\nREPLACE\nLINE1";
+    const result = await ws.applyPatch("multiline.py", patch, range.hash);
+    assert.equal(result.applied, true);
+    const content = await fs.readFile(path.join(root, "multiline.py"), "utf-8");
+    assert.equal(content, "LINE1\nline2\nline3\nline4\nline5\n");
   });
 });
 
@@ -247,6 +281,16 @@ describe("Workspace — patch", () => {
     assert.equal(result.applied, true);
     const content = await fs.readFile(path.join(root, "patch.txt"), "utf-8");
     assert.equal(content, "hello\nuniverse\nfoo\n");
+  });
+
+  it("applyPatch returns previousContent for the editor's diff/revert flow", async () => {
+    const ws = new Workspace(root);
+    await ws.writeFile("patch.txt", "hello\nworld\nfoo\n");
+    const read = await ws.readFile("patch.txt");
+    const patch = "SEARCH\nworld\nREPLACE\nuniverse";
+    const result = await ws.applyPatch("patch.txt", patch, read.hash);
+    assert.equal(result.previousContent, "hello\nworld\nfoo\n",
+      "applyPatch must return the pre-patch content so the editor can diff and revert");
   });
 
   it("rejects patch with stale hash", async () => {
@@ -313,6 +357,53 @@ describe("Workspace — patch", () => {
     const content = await fs.readFile(path.join(root, "indented.py"), "utf-8");
     // First matched line's 4-space indent is preserved; second line keeps model's 2-space.
     assert.equal(content, "def foo():\n    x = 2\n  return x + 1\n");
+  });
+
+  it("applies patch with ### SEARCH / ### REPLACE markers and long dash separators", async () => {
+    const ws = new Workspace(root);
+    await ws.writeFile("style.css", "body { color: red; }\n");
+    const read = await ws.readFile("style.css");
+    // This is the exact format the LLM emits in the transcript:
+    // 30-dash separator + "### SEARCH" / "### REPLACE" markers
+    const patch =
+      "------------------------------\n" +
+      "### SEARCH\n" +
+      "body { color: red; }\n" +
+      "### REPLACE\n" +
+      "body { color: blue; }\n" +
+      "------------------------------";
+    const result = await ws.applyPatch("style.css", patch, read.hash);
+    assert.equal(result.applied, true);
+    assert.notEqual(result.hash, read.hash);
+    const content = await fs.readFile(path.join(root, "style.css"), "utf-8");
+    assert.equal(content, "body { color: blue; }\n");
+  });
+
+  it("rejects patch with unrecognized markers instead of silently no-oping", async () => {
+    const ws = new Workspace(root);
+    await ws.writeFile("noop.txt", "hello\nworld\n");
+    const read = await ws.readFile("noop.txt");
+    // Markers the parser doesn't recognize — previously this would silently
+    // return success with unchanged content (the phantom-success bug).
+    const patch = "### FIND\nhello\n### SWAP\nbye";
+    await assert.rejects(
+      () => ws.applyPatch("noop.txt", patch, read.hash),
+      (e: any) => /No valid SEARCH\/REPLACE blocks/i.test(e.message),
+    );
+    // File must be unchanged
+    const content = await fs.readFile(path.join(root, "noop.txt"), "utf-8");
+    assert.equal(content, "hello\nworld\n");
+  });
+
+  it("rejects patch where REPLACE is identical to SEARCH (no-op)", async () => {
+    const ws = new Workspace(root);
+    await ws.writeFile("same.txt", "hello\n");
+    const read = await ws.readFile("same.txt");
+    const patch = "SEARCH\nhello\nREPLACE\nhello";
+    await assert.rejects(
+      () => ws.applyPatch("same.txt", patch, read.hash),
+      (e: any) => /produced no changes/i.test(e.message),
+    );
   });
 });
 
