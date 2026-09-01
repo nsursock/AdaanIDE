@@ -30,6 +30,16 @@ export const DEFAULT_FREE_POOL: string[] = [
   "google/gemini-2.0-flash-exp:free",
 ];
 
+/** Extra failover attempts sourced from the live /models catalog once the
+ *  static pool is exhausted (OpenRouter's free-tier lineup churns often). */
+const LIVE_FALLBACK_LIMIT = 4;
+
+/** How long to trust a cached live-catalog fetch before refetching. */
+const LIVE_MODELS_CACHE_TTL_MS = 5 * 60_000;
+
+/** Timeout for the /models catalog fetch — must not hang a chat turn. */
+const LIST_MODELS_TIMEOUT_MS = 8_000;
+
 interface OpenRouterProviderOptions {
   apiKey: string;
   baseUrl?: string;
@@ -47,6 +57,7 @@ export class OpenRouterProvider implements LLMProvider {
   private siteName: string;
   private idleTimeoutMs: number;
   private lastUsed: Map<string, number> = new Map(); // model -> timestamp (for LRU)
+  private liveFreeModelsCache: { ids: string[]; fetchedAt: number } | null = null;
 
   constructor(opts: OpenRouterProviderOptions) {
     this.apiKey = opts.apiKey;
@@ -107,50 +118,108 @@ export class OpenRouterProvider implements LLMProvider {
     messages: ProviderMessage[],
     options: ProviderChatOptions,
   ): AsyncIterable<ProviderEvent> {
-    const model = options.model;
-    const maxRetries = Math.max(0, this.freePool.length - 1);
-    let currentModel = model;
-    let retries = 0;
+    const initialModel = options.model;
+    const tried = new Set<string>([initialModel]);
+    let currentModel = initialModel;
+    // Budget: every model in the static pool, plus a handful of extra
+    // attempts sourced from the live /models catalog (models come and go on
+    // OpenRouter's free tier faster than we can keep a hardcoded list current).
+    // An explicitly empty pool means "no failover" — respect that and never
+    // hit the network for a live catalog fallback.
+    const poolEnabled = this.freePool.length > 0;
+    const maxAttempts = poolEnabled ? this.freePool.length + LIVE_FALLBACK_LIMIT : 1;
+    let attempts = 0;
 
-    while (retries <= maxRetries) {
+    while (attempts < maxAttempts) {
       try {
         yield* this.doChatRequest(messages, { ...options, model: currentModel });
         return;
       } catch (e: any) {
+        attempts++;
         const statusCode = e.statusCode ?? e.status;
-        const retryable = statusCode === 429 || statusCode === 503;
+        // 429/503 are rate-limit/overload signals. OpenRouter also returns a
+        // 404 when a model slug that was previously free has been withdrawn
+        // or deprecated (e.g. "This model is unavailable for free...") — that
+        // is just as recoverable by picking another free model, so treat it
+        // the same way instead of dying on what looks like a permanent error.
+        // A 402 "Insufficient balance" means the *backing provider* for that
+        // particular free model is out of credits — OpenRouter routes free
+        // models through different providers, so another free model backed by
+        // a different provider may still work.
+        const retryable =
+          statusCode === 429 ||
+          statusCode === 503 ||
+          statusCode === 402 ||
+          isModelUnavailableError(statusCode, e.message);
 
-        if (!retryable || retries >= maxRetries) {
+        if (!retryable || attempts >= maxAttempts) {
+          // If every model we tried was a free-tier slug, the free tier is
+          // effectively unavailable right now — let the caller offer the
+          // user a paid fallback instead of just reporting a dead end.
+          const allTriedWereFree = [...tried].every((m) => m.endsWith(":free"));
           yield {
             type: "error",
             data: {
               message: e.message ?? "Unknown provider error",
               statusCode,
               retryable: false,
+              allFreeModelsExhausted: allTriedWereFree && tried.size > 1,
+              triedModels: [...tried],
             },
           };
           return;
         }
 
-        // Failover to next model in pool. Models picked from the live
-        // /models list are usually not in the static pool, so fall back to
-        // rotating into the pool instead of giving up.
-        const next = this.nextModel(currentModel) ?? this.pickModel();
-        if (!next || next === currentModel) {
+        // Failover to a model we haven't tried yet — first from the static
+        // pool, then from the live catalog if the pool is exhausted.
+        let next = this.freePool.find((m) => !tried.has(m)) ?? null;
+        if (!next && poolEnabled) {
+          const live = await this.getLiveFreeModelIds();
+          next = live.find((m) => !tried.has(m)) ?? null;
+        }
+
+        if (!next) {
+          const allTriedWereFree = [...tried].every((m) => m.endsWith(":free"));
           yield {
             type: "error",
             data: {
-              message: `Rate limited on ${currentModel} and no fallback available`,
+              message: `${currentModel} failed and no untried fallback model is available`,
               statusCode,
               retryable: false,
+              allFreeModelsExhausted: allTriedWereFree && tried.size > 1,
+              triedModels: [...tried],
             },
           };
           return;
         }
 
+        tried.add(next);
+        this.lastUsed.set(next, Date.now());
         currentModel = next;
-        retries++;
       }
+    }
+  }
+
+  /**
+   * Fetch the current list of free model ids from OpenRouter, cached briefly
+   * so repeated failovers within the same burst of requests don't all hit
+   * the catalog endpoint. Falls back to an empty list on error so callers
+   * can treat "no live data" the same as "no more fallbacks".
+   */
+  private async getLiveFreeModelIds(): Promise<string[]> {
+    const now = Date.now();
+    if (this.liveFreeModelsCache && now - this.liveFreeModelsCache.fetchedAt < LIVE_MODELS_CACHE_TTL_MS) {
+      return this.liveFreeModelsCache.ids;
+    }
+    try {
+      const { free } = await this.listModels();
+      // Tools-capable models are sorted first by listModels(), which matters
+      // here since the agent always needs tool calling.
+      const ids = free.map((m) => m.id);
+      this.liveFreeModelsCache = { ids, fetchedAt: now };
+      return ids;
+    } catch {
+      return this.liveFreeModelsCache?.ids ?? [];
     }
   }
 
@@ -389,12 +458,16 @@ export class OpenRouterProvider implements LLMProvider {
   }
 
   async listModels(): Promise<ModelGroups> {
+    // Bounded with a timeout — this is called both for the model picker and
+    // as a failover fallback mid-turn, and must never hang the whole request
+    // if OpenRouter's catalog endpoint stalls.
     const response = await fetch(`${this.baseUrl}/models`, {
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
         "HTTP-Referer": this.siteUrl,
         "X-Title": this.siteName,
       },
+      signal: AbortSignal.timeout(LIST_MODELS_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -436,6 +509,20 @@ export class OpenRouterProvider implements LLMProvider {
 
     return { free, paid };
   }
+}
+
+/**
+ * OpenRouter returns a 404 (not the more typical 400) when a model slug has
+ * been withdrawn from the free tier or deprecated, e.g.:
+ * `{"error":{"message":"This model is unavailable for free. The paid
+ * version is available now - use this slug instead: ...","code":404}}`.
+ * That's functionally the same as a rate limit for our purposes — pick
+ * another free model and keep going instead of failing the whole turn.
+ */
+function isModelUnavailableError(statusCode: number | undefined, message: string | undefined): boolean {
+  if (statusCode !== 404) return false;
+  if (!message) return true;
+  return /unavailable|not a valid model|no endpoints found|model not found/i.test(message);
 }
 
 function mapFinishReason(reason: string): "stop" | "tool_calls" | "length" | "content_filter" {

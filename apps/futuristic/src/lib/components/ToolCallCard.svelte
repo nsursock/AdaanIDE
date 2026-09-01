@@ -40,6 +40,11 @@
   }
 
   const shell = $derived(isShellResult(toolCall.result) ? toolCall.result : null);
+  const resultWarning = $derived(
+    toolCall.result && typeof toolCall.result === "object" && "warning" in (toolCall.result as any)
+      ? ((toolCall.result as any).warning as string)
+      : null,
+  );
   const stdoutPreview = $derived((shell?.stdout ?? "").trim().split("\n")[0]?.slice(0, 80) ?? "");
 
   $effect(() => {
@@ -137,12 +142,23 @@
       </span>
     {/if}
 
-    {#if toolCall.result !== undefined && !toolCall.error}
+    {#if resultWarning}
+      <span class="ml-auto tool-badge warn">
+        <IconAlertTriangle size={11} /> warning
+      </span>
+    {:else if toolCall.result !== undefined && !toolCall.error}
       <span class="ml-auto tool-badge ok">
         <IconCheck size={11} /> ok
       </span>
     {/if}
   </button>
+
+  {#if resultWarning}
+    <div class="px-2.5 py-1.5 border-t border-[var(--color-border)] bg-[rgba(255,184,108,0.06)] text-[0.6875rem] text-[var(--color-warning)] flex items-start gap-1.5">
+      <IconAlertTriangle size={12} class="flex-shrink-0 mt-0.5" />
+      <span>{resultWarning}</span>
+    </div>
+  {/if}
 
   {#if toolCall.pending && pendingSeconds >= 15}
     <div class="px-2.5 py-1.5 border-t border-[var(--color-border)] bg-[rgba(255,184,108,0.06)] text-[0.6875rem] text-[var(--color-warning)] flex items-center gap-1.5">
@@ -168,8 +184,8 @@
       {#if toolCall.result !== undefined}
         <div class="mb-2">
           {#if shell}
-            <div class="flex items-center gap-1.5 opacity-70 text-[0.625rem] font-bold uppercase tracking-wider text-[var(--color-success)] mb-1">
-              <span>stdout{shell.exitCode !== undefined ? ` · exit ${shell.exitCode}` : ""}{shell.timedOut ? " · timed out" : ""}</span>
+            <div class="flex items-center gap-1.5 opacity-70 text-[0.625rem] font-bold uppercase tracking-wider {shell.timedOut ? 'text-[var(--color-warning)]' : 'text-[var(--color-success)]'} mb-1">
+              <span>stdout{shell.timedOut ? " · timed out" : shell.exitCode !== undefined ? ` · exit ${shell.exitCode}` : ""}</span>
             </div>
             {#if (shell.stdout ?? "").trim()}
               <pre class="tool-stdout max-h-72 overflow-y-auto">{shell.stdout}</pre>

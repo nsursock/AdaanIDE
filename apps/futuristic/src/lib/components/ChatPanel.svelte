@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { chatStore, workspaceStore, type ModelInfo } from "@adaan/core";
+  import { chatStore, workspaceStore, type ModelInfo, type ChatMessageEntry } from "@adaan/core";
   import { onMount } from "svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ModelPicker from "./ModelPicker.svelte";
@@ -64,6 +64,21 @@
     if (!input.trim() || chatStore.streaming) return;
     const message = input.trim();
     input = "";
+    await sendMessage(message);
+  }
+
+  /**
+   * Core send path, shared by the console input and the "Try Paid Model"
+   * retry flow so both go through the same session/SSE wiring.
+   */
+  async function sendMessage(message: string) {
+    if (chatStore.streaming) return;
+    // A new turn supersedes any tool approval left over from a previous,
+    // now-abandoned turn — the backend auto-denies those (see
+    // AgentSession.resume()), so drop the matching UI state too instead of
+    // leaving cards stuck showing "pending" forever.
+    pendingApprovals = [];
+    chatStore.cancelPendingToolCalls();
     chatStore.addUserMessage(message);
 
     const model = chatStore.selectedModel?.id || undefined;
@@ -228,6 +243,35 @@
     pendingApprovals = [];
   }
 
+  /**
+   * Refresh the live model catalog and switch to the first tools-capable
+   * paid model, then re-issue the request that failed. Called when every
+   * free model we tried for a turn turned out to be unavailable.
+   */
+  async function tryPaidModel(msg: ChatMessageEntry) {
+    await loadModels();
+    if (!models || models.paid.length === 0) return;
+
+    const paidModel = models.paid.find((m) => m.toolsCapable) ?? models.paid[0];
+    chatStore.setModel(paidModel);
+
+    // Find the user message that started the failed turn so we can retry it.
+    const idx = chatStore.messages.findIndex((m) => m.id === msg.id);
+    const userMsg = chatStore.messages
+      .slice(0, idx)
+      .reverse()
+      .find((m) => m.role === "user");
+
+    msg.freeModelsExhausted = undefined;
+    if (userMsg) {
+      await sendMessage(userMsg.content);
+    }
+  }
+
+  function dismissExhausted(msg: ChatMessageEntry) {
+    msg.freeModelsExhausted = undefined;
+  }
+
   async function copyTranscript() {
     if (chatStore.messages.length === 0) return;
     const text = chatStore.toTranscript();
@@ -333,7 +377,11 @@
       </div>
     {:else}
       {#each chatStore.messages as msg (msg.id)}
-        <ChatMessage {msg} />
+        <ChatMessage
+          {msg}
+          onTryPaidModel={() => tryPaidModel(msg)}
+          onDismissExhausted={() => dismissExhausted(msg)}
+        />
       {/each}
     {/if}
 

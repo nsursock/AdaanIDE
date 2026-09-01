@@ -98,6 +98,7 @@ export type AgentEventType =
   | "tool.cache_hit"
   | "context.pruned"
   | "model.used"
+  | "model.free_exhausted"
   | "done"
   | "error"
   | "cancelled";

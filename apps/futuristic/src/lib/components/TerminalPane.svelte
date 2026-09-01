@@ -8,6 +8,7 @@
     IconChevronRight,
     IconArrowsHorizontal,
     IconColumnInsertLeft,
+    IconSquare,
   } from "@tabler/icons-svelte";
 
   let { workspaceRoot, height = 220 }: { workspaceRoot: string; height?: number } = $props();
@@ -29,6 +30,7 @@
   let dragOver = $state(false);
   let scrollEl: HTMLDivElement;
   let inputEl: HTMLInputElement;
+  let abortController: AbortController | null = null;
 
   const terminalMode = $derived(settingsStore.settings.terminalMode);
 
@@ -152,26 +154,80 @@
     entries = [...entries, entry];
     scrollToEnd();
 
+    abortController = new AbortController();
+
     try {
       const res = await fetch("/api/terminal/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ root: workspaceRoot, command: cmd }),
+        signal: abortController.signal,
       });
-      const data = await res.json();
-      entry.stdout = stripAnsi(data.stdout ?? "");
-      entry.stderr = stripAnsi(data.stderr ?? "");
-      entry.exitCode = data.exitCode ?? -1;
-      entry.timedOut = !!data.timedOut;
-      entry.denied = !!data.denied;
-      if (!res.ok && data.error && !entry.stderr) entry.stderr = data.error;
-    } catch (e) {
-      entry.stderr = e instanceof Error ? e.message : "Network error";
-      entry.exitCode = -1;
+
+      // Denied / error responses are plain JSON, not SSE
+      if (!res.ok || !res.headers.get("Content-Type")?.includes("text/event-stream")) {
+        const data = await res.json();
+        entry.stderr = data.error ?? "Request failed";
+        entry.exitCode = data.exitCode ?? -1;
+        entry.denied = !!data.denied;
+        return;
+      }
+
+      // Read the SSE stream
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Parse complete SSE messages (separated by \n\n)
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.type === "stdout") {
+              entry.stdout += stripAnsi(evt.data);
+            } else if (evt.type === "stderr") {
+              entry.stderr += stripAnsi(evt.data);
+            } else if (evt.type === "exit") {
+              entry.exitCode = parseInt(evt.data, 10);
+            } else if (evt.type === "error") {
+              entry.stderr += evt.data;
+              entry.exitCode = -1;
+            }
+          } catch {
+            // ignore malformed events
+          }
+          scrollToEnd();
+        }
+      }
+    } catch (e: any) {
+      if (e.name === "AbortError") {
+        entry.timedOut = true;
+        entry.stderr += "\n(stopped by user)";
+      } else {
+        entry.stderr = e instanceof Error ? e.message : "Network error";
+        entry.exitCode = -1;
+      }
     } finally {
       running = false;
+      abortController = null;
       scrollToEnd();
       inputEl?.focus();
+    }
+  }
+
+  function stop() {
+    if (abortController) {
+      abortController.abort();
     }
   }
 
@@ -209,6 +265,9 @@
     } else if (e.key === "l" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       clear();
+    } else if (e.key === "c" && e.ctrlKey && running) {
+      e.preventDefault();
+      stop();
     }
   }
 
@@ -236,6 +295,14 @@
     <div class="flex items-center gap-1.5">
       {#if running}
         <span class="terminal-running"><span class="dot"></span> running</span>
+        <button
+          class="icon-btn terminal-stop-btn"
+          onclick={stop}
+          title="Stop running command (Ctrl+C)"
+          aria-label="Stop running command"
+        >
+          <IconSquare size={12} />
+        </button>
       {/if}
       <button
         class="icon-btn"
@@ -358,6 +425,15 @@
     background: var(--color-accent);
     box-shadow: 0 0 8px var(--color-accent);
     animation: dot-pulse 1.2s ease-in-out infinite;
+  }
+
+  .terminal-stop-btn {
+    color: var(--color-error);
+    border-color: rgba(var(--error-rgb, 255, 85, 85), 0.3);
+  }
+  .terminal-stop-btn:hover {
+    background: rgba(var(--error-rgb, 255, 85, 85), 0.12);
+    border-color: var(--color-error);
   }
 
   .terminal-output {

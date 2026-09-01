@@ -186,4 +186,137 @@ describe("OpenRouterProvider — SSE streaming", () => {
     assert.equal(seenModels[0], "custom/out-of-pool:free");
     assert.ok(DEFAULT_FREE_POOL.includes(seenModels[1]), `failover should use a pool model, got ${seenModels[1]}`);
   });
+
+  it("fails over to pool model when OpenRouter reports the model unavailable for free (404)", async () => {
+    seenModels.length = 0;
+    handler = (_req, res, body) => {
+      if (body.model === "minimax/minimax-m3:free") {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: {
+              message:
+                "This model is unavailable for free. The paid version is available now - use this slug instead: deepseek/deepseek-r1",
+              code: 404,
+            },
+          }),
+        );
+        return;
+      }
+      sse(res, [
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "hello" } }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ]);
+      setTimeout(() => res.end(), 50);
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl });
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "minimax/minimax-m3:free", tools: [] }),
+    );
+
+    const types = events.map((e) => e.type);
+    assert.ok(!types.includes("error"), `should fail over silently, got: ${types.join(",")}`);
+    assert.ok(types.includes("text.delta"), `expected text after failover, got: ${types.join(",")}`);
+    assert.equal(seenModels[0], "minimax/minimax-m3:free");
+    assert.ok(DEFAULT_FREE_POOL.includes(seenModels[1]), `failover should use a pool model, got ${seenModels[1]}`);
+  });
+
+  it("does not fail over on a plain 404 unrelated to model availability", async () => {
+    seenModels.length = 0;
+    handler = (_req, res) => {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Not found", code: 404 } }));
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl, freePool: [] });
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "some/model:free", tools: [] }),
+    );
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].type, "error");
+  });
+
+  it("fails over on 402 'Insufficient balance' (backing provider out of credits)", async () => {
+    seenModels.length = 0;
+    handler = (_req, res, body) => {
+      if (body.model === "cohere/north-mini-code:free") {
+        res.writeHead(402, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: {
+              message: "Provider returned error",
+              code: 402,
+              metadata: {
+                raw: '{"error":"Insufficient balance","reason":"model_access_denied"}',
+                provider_name: "GMICloud",
+                is_byok: false,
+              },
+            },
+          }),
+        );
+        return;
+      }
+      sse(res, [
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "hello" } }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ]);
+      setTimeout(() => res.end(), 50);
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl });
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "cohere/north-mini-code:free", tools: [] }),
+    );
+
+    const types = events.map((e) => e.type);
+    assert.ok(!types.includes("error"), `should fail over silently, got: ${types.join(",")}`);
+    assert.ok(types.includes("text.delta"), `expected text after failover, got: ${types.join(",")}`);
+    assert.equal(seenModels[0], "cohere/north-mini-code:free");
+    assert.ok(DEFAULT_FREE_POOL.includes(seenModels[1]), `failover should use a pool model, got ${seenModels[1]}`);
+  });
+
+  it("reports allFreeModelsExhausted once the static pool and live catalog are both exhausted", async () => {
+    seenModels.length = 0;
+    handler = (req, res, body) => {
+      if (req.url?.endsWith("/models")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            data: [
+              {
+                id: "live/only-free-model:free",
+                name: "Live Free",
+                context_length: 8192,
+                pricing: { prompt: "0", completion: "0" },
+                supported_parameters: ["tools"],
+              },
+            ],
+          }),
+        );
+        return;
+      }
+      // Every chat completion attempt — regardless of model — is unavailable.
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: { message: "This model is unavailable for free. Use paid instead.", code: 404 },
+        }),
+      );
+    };
+
+    const provider = new OpenRouterProvider({ apiKey: "k", baseUrl, freePool: ["only/pool-model:free"] });
+    const events = await collect(
+      provider.chat([{ role: "user", content: "hi" }], { model: "start/model:free", tools: [] }),
+    );
+
+    const last = events[events.length - 1];
+    assert.equal(last.type, "error");
+    const data = last.data as { allFreeModelsExhausted?: boolean; triedModels?: string[] };
+    assert.equal(data.allFreeModelsExhausted, true);
+    assert.ok(data.triedModels?.includes("start/model:free"));
+    assert.ok(data.triedModels?.includes("only/pool-model:free"));
+    assert.ok(data.triedModels?.includes("live/only-free-model:free"), `should have tried the live-catalog model too, got: ${data.triedModels}`);
+  });
 });

@@ -1,9 +1,17 @@
 <script lang="ts">
   import type { ChatMessageEntry } from "@adaan/core";
   import ToolCallCard from "./ToolCallCard.svelte";
-  import { IconUser, IconBrain, IconCpu, IconSparkles } from "@tabler/icons-svelte";
+  import { IconUser, IconBrain, IconCpu, IconSparkles, IconAlertTriangle, IconCreditCard, IconX } from "@tabler/icons-svelte";
 
-  let { msg } = $props<{ msg: ChatMessageEntry }>();
+  let {
+    msg,
+    onTryPaidModel = () => {},
+    onDismissExhausted = () => {},
+  } = $props<{
+    msg: ChatMessageEntry;
+    onTryPaidModel?: () => void;
+    onDismissExhausted?: () => void;
+  }>();
 </script>
 
 <div class="msg-card {msg.role}">
@@ -37,6 +45,34 @@
       {#each msg.toolCalls as tc (tc.id)}
         <ToolCallCard toolCall={tc} />
       {/each}
+    </div>
+  {/if}
+
+  <!-- Stream / System Error — always terminal, so it renders last -->
+  {#if msg.error}
+    <div class="mt-2 p-2.5 rounded border border-[rgba(255,85,85,0.4)] bg-[rgba(255,85,85,0.08)] flex items-start gap-2 text-[var(--color-error)] text-xs font-mono">
+      <IconAlertTriangle size={15} class="flex-shrink-0 mt-0.5" />
+      <span class="break-words">{msg.error}</span>
+    </div>
+  {/if}
+
+  <!-- All free models unavailable — offer a paid fallback -->
+  {#if msg.freeModelsExhausted}
+    <div class="mt-2 p-2.5 rounded border border-[rgba(255,184,108,0.4)] bg-[rgba(255,184,108,0.08)] text-xs font-mono">
+      <div class="flex items-start gap-2 text-[var(--color-warning)] mb-2">
+        <IconAlertTriangle size={15} class="flex-shrink-0 mt-0.5" />
+        <span class="break-words">
+          Every free model tried is currently unavailable ({msg.freeModelsExhausted.triedModels.join(", ")}).
+        </span>
+      </div>
+      <div class="flex gap-2">
+        <button class="approval-btn approve flex-1 justify-center" onclick={onTryPaidModel}>
+          <IconCreditCard size={14} /> Try Paid Model
+        </button>
+        <button class="approval-btn deny flex-1 justify-center" onclick={onDismissExhausted}>
+          <IconX size={14} /> Dismiss
+        </button>
+      </div>
     </div>
   {/if}
 </div>

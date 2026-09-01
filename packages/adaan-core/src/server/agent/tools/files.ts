@@ -2,6 +2,31 @@ import type { ToolHandler, ToolResult } from "../../../types.js";
 import { assertAgentPathAccess } from "../../security.js";
 import { listSymbols, extractSymbolContent } from "./symbols.js";
 
+const CODE_EXTENSIONS = new Set([
+  "js", "jsx", "mjs", "cjs", "ts", "tsx", "svelte", "vue", "py", "css", "scss", "html", "json",
+]);
+
+/**
+ * Weaker models occasionally double-escape newlines when emitting huge file
+ * content as a JSON tool-call argument, producing a literal two-character
+ * `\n` (backslash + n) in the written file instead of a real line break —
+ * e.g. `scene;\n  let blobs` instead of an actual newline. That's a syntax
+ * bomb that silently corrupts the file. Flag the unmistakable pattern (the
+ * artifact sitting right after a statement terminator, followed by an
+ * identifier) as a non-fatal warning so the model catches it immediately
+ * instead of only noticing after the build fails.
+ */
+function detectEscapedNewlineCorruption(path: string, content: string): string | undefined {
+  const ext = path.split(".").pop()?.toLowerCase();
+  if (!ext || !CODE_EXTENSIONS.has(ext)) return undefined;
+
+  const match = content.match(/[;{}]\\n\s*[A-Za-z_$]/);
+  if (!match) return undefined;
+
+  const snippet = content.slice(Math.max(0, match.index! - 20), match.index! + 30);
+  return `Possible corrupted content: found a literal "\\n" (backslash + n) instead of a real line break near "...${snippet}...". This usually means newlines got double-escaped while writing this file. Re-check the file with read_file and fix it with apply_patch if needed.`;
+}
+
 export const listFilesHandler: ToolHandler = async (args, ctx) => {
   const dir = (args.dir as string) || undefined;
   if (dir) {
@@ -117,7 +142,8 @@ export const writeFileHandler: ToolHandler = async (args, ctx) => {
   const content = args.content as string;
   const expectedHash = args.expectedHash as string | undefined;
   const result = await ctx.workspace.writeFile(filePath, content, expectedHash);
-  return { success: true, output: result };
+  const warning = detectEscapedNewlineCorruption(filePath, content);
+  return { success: true, output: warning ? { ...result, warning } : result };
 };
 
 export const createFileHandler: ToolHandler = async (args, ctx) => {
@@ -125,7 +151,8 @@ export const createFileHandler: ToolHandler = async (args, ctx) => {
   const content = (args.content as string) ?? "";
   assertAgentPathAccess(filePath, "create");
   const result = await ctx.workspace.createFile(filePath, content);
-  return { success: true, output: result };
+  const warning = detectEscapedNewlineCorruption(filePath, content);
+  return { success: true, output: warning ? { ...result, warning } : result };
 };
 
 export const deleteFileHandler: ToolHandler = async (args, ctx) => {

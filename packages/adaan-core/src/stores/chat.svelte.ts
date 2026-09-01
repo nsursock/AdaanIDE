@@ -17,6 +17,10 @@ export interface ChatMessageEntry {
   }>;
   modelUsed?: string;
   timestamp: number;
+  error?: string;
+  /** Set when every free model we tried for this turn is currently
+   *  unavailable — the UI should offer to retry with a paid model. */
+  freeModelsExhausted?: { message: string; triedModels: string[] };
 }
 
 class ChatStore {
@@ -83,6 +87,16 @@ class ChatStore {
     if (msg) msg.modelUsed = modelId;
   }
 
+  setAssistantError(id: string, error: string) {
+    const msg = this.messages.find((m) => m.id === id);
+    if (msg) msg.error = error;
+  }
+
+  setFreeModelsExhausted(id: string, message: string, triedModels: string[]) {
+    const msg = this.messages.find((m) => m.id === id);
+    if (msg) msg.freeModelsExhausted = { message, triedModels };
+  }
+
   addToolCallToAssistant(id: string, toolCall: {
     id: string;
     name: string;
@@ -113,6 +127,25 @@ class ChatStore {
 
   finishStreaming() {
     this.streaming = false;
+  }
+
+  /**
+   * Mark any tool calls still awaiting approval as cancelled. Called before
+   * starting a new turn, since the backend auto-denies stale approvals from
+   * an abandoned turn (see AgentSession.resume()) and the corresponding UI
+   * cards would otherwise show "running"/"pending" forever.
+   */
+  cancelPendingToolCalls() {
+    for (const msg of this.messages) {
+      if (!msg.toolCalls) continue;
+      for (const tc of msg.toolCalls) {
+        if (tc.pending) {
+          tc.pending = false;
+          tc.approvalRequired = false;
+          tc.error = "Cancelled — a new message was sent before this was resolved.";
+        }
+      }
+    }
   }
 
   clear() {
@@ -160,6 +193,18 @@ class ChatStore {
             lines.push(`  result: ${resultStr.replace(/\n/g, "\n  ")}`);
           }
         }
+      }
+      // The error (if any) is a terminal event — it always happens after any
+      // content/tool calls the model already produced in this turn, so it
+      // must be printed last, not first.
+      if (msg.error) {
+        lines.push("");
+        lines.push(`  [ERROR]: ${msg.error}`);
+      }
+      if (msg.freeModelsExhausted) {
+        lines.push("");
+        lines.push(`  [FREE MODELS EXHAUSTED]: ${msg.freeModelsExhausted.message}`);
+        lines.push(`  tried: ${msg.freeModelsExhausted.triedModels.join(", ")}`);
       }
     }
 
@@ -230,10 +275,23 @@ class ChatStore {
         break;
       }
       case "done":
-      case "error":
       case "cancelled":
         this.finishStreaming();
         break;
+      case "error": {
+        const data = event.data as { message?: string } | undefined;
+        if (data?.message) {
+          this.setAssistantError(assistantId, data.message);
+        }
+        this.finishStreaming();
+        break;
+      }
+      case "model.free_exhausted": {
+        const data = event.data as { message: string; triedModels: string[] };
+        this.setFreeModelsExhausted(assistantId, data.message, data.triedModels);
+        this.finishStreaming();
+        break;
+      }
     }
   }
 }

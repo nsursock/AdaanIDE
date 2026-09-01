@@ -24,6 +24,9 @@ CRITICAL RULES:
 - If the user confirmed a proposed change ("yes", "do it", "fix it", "continue"), apply it immediately — do not re-explore or re-explain.
 - When editing existing files, always read the file first to get its hash, then use apply_patch with the expectedHash.
 - When creating new files, use create_file with the path AND content arguments in a single call. Do NOT create an empty file and then write to it — pass the full content directly to create_file.
+- When asked to code, build, or implement an app, game, component, or algorithm, complete the ENTIRE implementation. Write all required files (HTML, CSS, JS, Svelte, components, tests, etc.) to disk. Do not stop after only listing files or creating directories.
+- NEVER output full file contents as markdown code blocks in chat. ALWAYS use create_file or apply_patch to write code directly to disk.
+- If a file you just created or edited turns out wrong or corrupted (e.g. broken syntax, wrong design), fix it with write_file (using the hash from read_file) or apply_patch — NEVER use delete_file to "start over". delete_file requires user approval and interrupts the flow; overwriting does not and is always the right tool for correcting your own mistakes.
 - Run tests after making changes to verify your work.
 - Use git_checkpoint before risky changes.
 - Be concise in your explanations. Show the user what you're doing via tool calls.
@@ -31,7 +34,10 @@ CRITICAL RULES:
 - NEVER claim success when tool output shows failure. Read command output and test results carefully. If output contains "failed", "error", "✗", "Match: False", "traceback", or a non-zero exit code, report the failure honestly and attempt to fix it.
 - If a tool call fails, read the error message carefully and fix the issue — do not give up or ask the user for help.
 - NEVER end your response with "Would you like me to..." or "Do you want me to..." or similar offers. Just do the next logical thing. The user will tell you if they want something different.
-- NEVER announce an action ("I'll create...", "I'll add...", "Let me write...") without immediately following through with the corresponding tool call in the same response. If you say you're going to do something, DO it — do not describe the plan and then stop.`;
+- NEVER announce an action ("I'll create...", "I'll add...", "Let me write...") without immediately following through with the corresponding tool call in the same response. If you say you're going to do something, DO it — do not describe the plan and then stop.
+- NEVER use pkill, killall, or kill to terminate processes you did not start yourself. These commands kill ALL matching processes on the machine, including the user's own dev servers, IDE processes, and other unrelated work. If you need to stop a process you started, track its PID and kill that specific PID only.
+- NEVER try to start long-lived servers (npm run dev, vite, python -m http.server, etc.) via execute_command. Background processes started by execute_command do not persist beyond the tool call, so the server will be dead before the user can open it. Instead, tell the user to run the command themselves in their terminal.
+- When creating a Vite-based project, ALWAYS set \`server: { host: '127.0.0.1' }\` in vite.config.js. Node.js 18+ binds to IPv6 (::1) by default, but most browsers resolve localhost to IPv4 (127.0.0.1) first — without this setting the user gets ERR_CONNECTION_REFUSED even though vite says it's ready.`;
 
 export interface EngineOptions {
   provider: LLMProvider;
@@ -167,8 +173,22 @@ export class AgentEngine {
                   yield emit("cancelled");
                   return;
                 }
-                const data = event.data as { message: string };
-                yield emit("error", { message: data.message });
+                const data = event.data as {
+                  message: string;
+                  allFreeModelsExhausted?: boolean;
+                  triedModels?: string[];
+                };
+                // If every free model we tried is currently unavailable,
+                // give the user the option to fall back to a paid model
+                // instead of just reporting a dead end.
+                if (data.allFreeModelsExhausted) {
+                  yield emit("model.free_exhausted", {
+                    message: data.message,
+                    triedModels: data.triedModels ?? [],
+                  });
+                } else {
+                  yield emit("error", { message: data.message });
+                }
                 session.status = "error";
                 return;
               }
@@ -195,8 +215,55 @@ export class AgentEngine {
         session.messages.push(assistantMsg);
         session.modelUsed = modelUsed;
 
-        // If no tool calls, we're done
+        // If no tool calls, check if we're truly done or if the model stopped prematurely
         if (assistantToolCalls.length === 0) {
+          const isEmpty = !assistantContent.trim();
+          const isAnnouncement = /\b(I'll|I will|Let me|Let's|I'm going to|Now I'll|I'll now|I'll start|Next I will|Next I'll|Next, I will|Next, I'll)\b/i.test(
+            assistantContent,
+          );
+          // Check if model emitted source code blocks in text instead of writing to disk
+          const hasSourceCodeBlocks = /```(svelte|javascript|js|typescript|ts|python|py|html|css|json)\n[\s\S]{30,}?\n```/i.test(
+            assistantContent,
+          );
+
+          // Check if the user asked for an action (code/build/create) and no files have been written yet in this session
+          const filesModifiedInSession = session.messages.some(
+            (m) =>
+              m.role === "assistant" &&
+              m.toolCalls?.some((tc) =>
+                ["create_file", "write_file", "apply_patch"].includes(tc.function.name),
+              ),
+          );
+          const initialUserPrompt = session.messages.find((m) => m.role === "user")?.content.trim() ?? "";
+          const isActionRequest = /^(code|build|create|implement|make|write|develop|generate|setup|set up)\b/i.test(
+            initialUserPrompt,
+          );
+          const stoppedWithoutWriting = isActionRequest && !filesModifiedInSession;
+
+          const canRetry = iteration < this.maxIterations - 1;
+
+          if (canRetry && (isEmpty || isAnnouncement || hasSourceCodeBlocks || stoppedWithoutWriting)) {
+            // Replace the incomplete assistant message with a specific nudge
+            session.messages.pop();
+            let nudgeContent: string;
+            if (isEmpty) {
+              nudgeContent = "Your previous response was empty. Please take action and execute the tools needed to complete the user's request.";
+            } else if (hasSourceCodeBlocks) {
+              nudgeContent = "You provided code in markdown text instead of writing it to disk. Use create_file to write each file to the workspace.";
+            } else if (isAnnouncement) {
+              nudgeContent = "You announced an action but did not call any tools. Do not describe what you plan to do — call the tools now to actually do it.";
+            } else {
+              nudgeContent = "You haven't created the implementation files yet. Please proceed with creating the files using create_file to complete the requested task.";
+            }
+
+            session.messages.push({
+              role: "user",
+              content: nudgeContent,
+            });
+            iteration++;
+            session.iterationCount = iteration;
+            continue;
+          }
           session.status = "done";
           yield emit("done");
           return;

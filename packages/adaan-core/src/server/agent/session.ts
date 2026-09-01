@@ -51,6 +51,18 @@ export class AgentSession {
     if (this.abortController.signal.aborted) {
       this.abortController = new AbortController();
     }
+    // A new user message supersedes any in-flight turn. If the previous
+    // engine.run() generator is still suspended waiting on a tool approval
+    // (e.g. the user typed a follow-up instead of answering the prompt),
+    // that generator is about to be abandoned — auto-deny its approvals so
+    // they don't linger forever as zombie UI cards or silently resolve
+    // later against a conversation that has already moved on.
+    if (this.pendingApprovals.size > 0) {
+      for (const resolver of this.pendingApprovals.values()) {
+        resolver(false);
+      }
+      this.pendingApprovals.clear();
+    }
     this.status = "running";
     this.iterationCount = 0;
   }
