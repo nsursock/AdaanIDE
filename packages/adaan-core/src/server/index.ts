@@ -1,4 +1,5 @@
 export { Workspace } from "./workspace.js";
+export type { ShellResult, GitLogEntry } from "./workspace.js";
 export { FileHistory } from "./file-history.js";
 export type { HistoryEntry, HistoryListEntry } from "./file-history.js";
 export {

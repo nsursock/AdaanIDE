@@ -34,6 +34,25 @@ export interface ShellResult {
   timedOut: boolean;
 }
 
+export interface GitLogEntry {
+  /** Full commit SHA. */
+  hash: string;
+  /** First 7 chars of the SHA, for display. */
+  shortHash: string;
+  /** Commit author name. */
+  author: string;
+  /** ISO-8601 commit date. */
+  date: string;
+  /** Unix epoch (ms) parsed from `date`. */
+  timestamp: number;
+  /** Commit subject (first line of the message). */
+  message: string;
+  /** Name of the sub-repo this commit came from, when the workspace root
+   *  isn't itself a git repo but contains nested git repos. Undefined when
+   *  the commit came from the root-level repo. */
+  repo?: string;
+}
+
 export class Workspace {
   readonly rootPath: string;
   readonly name: string;
@@ -544,6 +563,213 @@ export class Workspace {
     const cmd = ref ? `git reset --hard ${ref}` : "git reset --hard HEAD~1";
     const r = await this.executeCommand(cmd);
     return r.stdout + r.stderr;
+  }
+
+  /**
+   * List commits (newest first) for the timeline UI.
+   *
+   * - `filePath` given: the FULL log of whichever repo that file belongs to
+   *   (root repo, or the nested repo containing it) — all commits, not just
+   *   the ones that touched the file.
+   * - `filePath` omitted: project-wide — when the root is a git repo, its
+   *   full log; when the root contains nested git repos, all their commits
+   *   aggregated and tagged with `repo`.
+   *
+   * Returns an empty array when the workspace isn't a git repo and has no
+   * nested repos.
+   */
+  async gitLog(filePath?: string, limit = 50): Promise<GitLogEntry[]> {
+    const format = "%H%x1f%an%x1f%aI%x1f%s";
+
+    // When a file path is given, find the repo it belongs to and return that
+    // repo's FULL log (not filtered to the file).
+    if (filePath) {
+      const repoAbs = await this.repoForPath(filePath);
+      if (repoAbs) {
+        return this.gitLogRepo(repoAbs, limit);
+      }
+      // File isn't in any nested repo — try root-level git.
+      const cmd = `git log -n ${limit} --pretty=format:${format}%x1e`;
+      let r;
+      try {
+        r = await this.executeCommand(cmd);
+      } catch {
+        return [];
+      }
+      if (r.exitCode !== 0) return [];
+      return this.parseGitLog(r.stdout);
+    }
+
+    // No file path — project-wide log.
+    const cmd = `git log -n ${limit} --pretty=format:${format}%x1e`;
+    let r;
+    try {
+      r = await this.executeCommand(cmd);
+    } catch {
+      r = { stdout: "", stderr: "", exitCode: 128, timedOut: false };
+    }
+    if (r.exitCode === 0) {
+      return this.parseGitLog(r.stdout);
+    }
+
+    // Root isn't a git repo — aggregate all nested repos.
+    const repos = await this.findNestedGitRepos();
+    if (repos.length === 0) return [];
+
+    const all: GitLogEntry[] = [];
+    for (const repo of repos) {
+      const entries = await this.gitLogRepo(repo.absPath, limit);
+      all.push(...entries);
+    }
+    all.sort((a, b) => b.timestamp - a.timestamp);
+    return all;
+  }
+
+  /** Full git log for a single repo (by absolute path), tagged with repo name. */
+  private async gitLogRepo(repoAbs: string, limit: number): Promise<GitLogEntry[]> {
+    const format = "%H%x1f%an%x1f%aI%x1f%s";
+    const repoCmd = `git --git-dir=${JSON.stringify(path.join(repoAbs, ".git"))} --work-tree=${JSON.stringify(repoAbs)} log -n ${limit} --pretty=format:${format}%x1e`;
+    let rr;
+    try {
+      rr = await this.executeCommand(repoCmd);
+    } catch {
+      return [];
+    }
+    if (rr.exitCode !== 0) return [];
+    const entries = this.parseGitLog(rr.stdout);
+    const repoName = path.basename(repoAbs);
+    for (const e of entries) e.repo = repoName;
+    return entries;
+  }
+
+  /** Parse `git log` stdout (record-separated by \x1e) into entries. */
+  private parseGitLog(stdout: string): GitLogEntry[] {
+    const out = stdout.trim();
+    if (!out) return [];
+    const records = out.split("\x1e").map((r) => r.trim()).filter(Boolean);
+    const entries: GitLogEntry[] = [];
+    for (const rec of records) {
+      const [hash, author, date, message] = rec.split("\x1f");
+      if (!hash) continue;
+      entries.push({
+        hash,
+        shortHash: hash.slice(0, 7),
+        author: author ?? "",
+        date: date ?? "",
+        timestamp: date ? Date.parse(date) : 0,
+        message: message ?? "",
+      });
+    }
+    return entries;
+  }
+
+  /** Cached result of the last nested-repo scan (so gitShowFile can find the
+   *  right repo without re-scanning). Undefined = root is a git repo or not
+   *  yet determined. */
+  private _nestedRepos: { name: string; absPath: string }[] | undefined;
+  /** Which repo the active git commands should target. */
+  private _gitRepoRoot: string | undefined;
+
+  /** Find directories containing a `.git` entry, up to 2 levels deep,
+   *  skipping common heavy dirs (node_modules, .git itself, etc.). */
+  private async findNestedGitRepos(): Promise<{ name: string; absPath: string }[]> {
+    if (this._nestedRepos !== undefined) return this._nestedRepos;
+    const repos: { name: string; absPath: string }[] = [];
+    const skip = new Set(["node_modules", ".git", "dist", "build", ".next", ".svelte-kit", "target", "vendor"]);
+    const scan = async (dir: string, depth: number) => {
+      if (depth > 2) return;
+      let entries: fssync.Dirent[];
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const ent of entries) {
+        if (!ent.isDirectory()) continue;
+        // Detect .git BEFORE the skip check — .git is in `skip` to avoid
+        // descending into it, but we still need to detect it as a repo marker.
+        if (ent.name === ".git") {
+          repos.push({ name: path.basename(dir), absPath: dir });
+          return;
+        }
+        if (skip.has(ent.name)) continue;
+        const abs = path.join(dir, ent.name);
+        await scan(abs, depth + 1);
+      }
+    };
+    await scan(this.rootPath, 0);
+    // Deduplicate (a repo at depth 1 won't also appear at depth 2).
+    const seen = new Set<string>();
+    const unique = repos.filter((r) => {
+      if (seen.has(r.absPath)) return false;
+      seen.add(r.absPath);
+      return true;
+    });
+    this._nestedRepos = unique;
+    return unique;
+  }
+
+  /** Resolve which nested repo a workspace-relative file path belongs to.
+   *  Returns the repo's absolute path, or undefined when not found. */
+  private async repoForPath(filePath: string): Promise<string | undefined> {
+    const repos = await this.findNestedGitRepos();
+    if (repos.length === 0) return undefined;
+    const abs = this.resolve(filePath);
+    for (const repo of repos) {
+      if (abs.startsWith(repo.absPath + path.sep) || abs === repo.absPath) {
+        return repo.absPath;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Return the content of `filePath` as it was at commit `hash`
+   * (`git show <hash>:<path>`). Returns null when the file didn't exist at
+   * that commit (so the caller can show a friendly error instead of crashing).
+   */
+  async gitShowFile(filePath: string, hash: string): Promise<string | null> {
+    // Determine the repo root and the path relative to it (supports nested repos).
+    const repoAbs = await this.repoForPath(filePath);
+    const gitPrefix = repoAbs
+      ? `--git-dir=${JSON.stringify(path.join(repoAbs, ".git"))} --work-tree=${JSON.stringify(repoAbs)}`
+      : "";
+    // Path relative to the repo root, not the workspace root.
+    const abs = this.resolve(filePath);
+    const relPath = repoAbs ? path.relative(repoAbs, abs) : filePath;
+    const cmd = `git ${gitPrefix} show ${JSON.stringify(`${hash}:${relPath}`)}`.trim();
+    let r;
+    try {
+      r = await this.executeCommand(cmd);
+    } catch {
+      return null;
+    }
+    // exit code 128 = commit/path doesn't exist
+    if (r.exitCode !== 0) return null;
+    return r.stdout;
+  }
+
+  /**
+   * Restore `filePath` to its state at commit `hash`. Snapshots the current
+   * content into local history first (so the restore is undoable from the
+   * timeline), then writes the commit's version back to disk. Returns the new
+   * content hash, or null when the file didn't exist at that commit.
+   */
+  async gitRestoreFile(filePath: string, hash: string): Promise<{ hash: string; content: string } | null> {
+    const content = await this.gitShowFile(filePath, hash);
+    if (content === null) return null;
+    const abs = this.resolve(filePath);
+    // Snapshot the current content first so the restore is undoable.
+    let currentContent = "";
+    try {
+      currentContent = await fs.readFile(abs, "utf-8");
+      await this.history.snapshot(filePath, currentContent, "restore", `before git restore of ${hash.slice(0, 7)}`, true);
+    } catch {
+      // file may not exist yet — nothing to snapshot
+    }
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, content, "utf-8");
+    return { hash: sha256(content), content };
   }
 
   // --- Existence -------------------------------------------------------------
