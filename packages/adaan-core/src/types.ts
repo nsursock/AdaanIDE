@@ -128,6 +128,7 @@ export type AgentEventType =
   | "context.pruned"
   | "model.used"
   | "model.fallback"
+  | "model.retry"
   | "model.free_exhausted"
   | "model.routed"
   | "model.escalated"
@@ -317,6 +318,7 @@ export type ProviderEventType =
   | "tool_call.complete"
   | "finish"
   | "model.fallback"
+  | "model.retry"
   | "provider.queued"
   | "error";
 

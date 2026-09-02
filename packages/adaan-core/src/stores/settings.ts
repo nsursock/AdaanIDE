@@ -7,7 +7,7 @@ import type { ThemeId } from "../types.js";
 import { DEFAULT_THEME, THEME_IDS } from "../themes.js";
 
 /** Bump when the persisted shape changes; `migrateBlob` always rewrites to this. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** Single localStorage key holding the whole settings blob as JSON. */
 export const STORAGE_KEY = "adaan.settings.v1";
@@ -68,6 +68,10 @@ export interface Settings {
   learningEnabled: boolean;
   /** Phase 4: whether exploration can spend paid requests (default off). */
   explorationPaidEnabled: boolean;
+  /** Phase 6: daily LLM-request quota for the free regime (OpenRouter's free
+   *  tier caps at 1000 req/day). Consumed = today's telemetry rollup `requests`.
+   *  Used by the dashboard's quota bar. 0 disables the quota display. */
+  quotaDailyLimit: number;
   /** When true (default), only one local model server may run at a time —
    *  starting a new one stops all others. When false, multiple servers
    *  can run simultaneously on their respective ports. */
@@ -100,6 +104,7 @@ export const DEFAULT_SETTINGS: Settings = {
   routingTiers: ["free", "mid", "frontier"],
   learningEnabled: true,
   explorationPaidEnabled: false,
+  quotaDailyLimit: 1000,
   singleLocalModel: true,
   modelAliases: {},
 };
@@ -196,6 +201,10 @@ export function migrateBlob(raw: unknown): Settings {
       typeof obj.learningEnabled === "boolean" ? obj.learningEnabled : DEFAULT_SETTINGS.learningEnabled,
     explorationPaidEnabled:
       typeof obj.explorationPaidEnabled === "boolean" ? obj.explorationPaidEnabled : DEFAULT_SETTINGS.explorationPaidEnabled,
+    quotaDailyLimit:
+      typeof obj.quotaDailyLimit === "number" && obj.quotaDailyLimit >= 0
+        ? Math.floor(obj.quotaDailyLimit)
+        : DEFAULT_SETTINGS.quotaDailyLimit,
     singleLocalModel:
       typeof obj.singleLocalModel === "boolean" ? obj.singleLocalModel : DEFAULT_SETTINGS.singleLocalModel,
     modelAliases: safeAliases(obj.modelAliases),

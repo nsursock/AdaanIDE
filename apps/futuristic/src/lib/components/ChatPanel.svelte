@@ -18,6 +18,7 @@
     IconCheck,
     IconBolt,
     IconClockPause,
+    IconFlask,
   } from "@tabler/icons-svelte";
 
   let { workspaceRoot, onFileChanged = () => {} } = $props();
@@ -36,6 +37,18 @@
   // yank them back down on every incoming token. Reset to true when the
   // user sends a new message (so their message + the reply stay visible).
   let stickToBottom = $state(true);
+
+  // Experiment tagging — when enabled, every sent message is tagged with
+  // {name, arm} so the Experiments tab can A/B compare configurations.
+  let expEnabled = $state(false);
+  let expName = $state("");
+  let expArm = $state("A");
+
+  /** Build the experiment payload for the session POST, or null when disabled. */
+  function experimentPayload(): { name: string; arm: string } | null {
+    if (!expEnabled || !expName.trim()) return null;
+    return { name: expName.trim(), arm: expArm.trim() || "A" };
+  }
 
   function onMessagesScroll() {
     if (!messagesContainer) return;
@@ -207,6 +220,7 @@
         explorationPaidEnabled: settingsStore.settings.explorationPaidEnabled,
         localModel: local,
         interrupt: false,
+        experiment: experimentPayload(),
       }),
     });
 
@@ -267,6 +281,7 @@
           explorationPaidEnabled: settingsStore.settings.explorationPaidEnabled,
           localModel: local,
           interrupt: true,
+          experiment: experimentPayload(),
         }),
       });
     } finally {
@@ -642,7 +657,34 @@
         {#if chatStore.streaming}
           <span class="ml-auto text-[var(--color-accent)] animate-pulse">Computing...</span>
         {/if}
+        <!-- Experiment tag toggle -->
+        <button
+          class="exp-toggle {expEnabled ? "exp-toggle-active" : ""} ml-auto"
+          onclick={() => (expEnabled = !expEnabled)}
+          title={expEnabled ? "Experiment tagging active — click to disable" : "Enable experiment tagging"}
+          aria-label="Toggle experiment tagging"
+        >
+          <IconFlask size={11} />
+        </button>
       </div>
+
+      <!-- Experiment tag inputs (only when enabled) -->
+      {#if expEnabled}
+        <div class="exp-row">
+          <span class="exp-label">Experiment:</span>
+          <input
+            bind:value={expName}
+            placeholder="name (e.g. prompt-v2)"
+            class="exp-input"
+          />
+          <span class="exp-label">Arm:</span>
+          <input
+            bind:value={expArm}
+            placeholder="A"
+            class="exp-input exp-input-arm"
+          />
+        </div>
+      {/if}
 
       <div class="flex gap-2 items-end mt-1">
         <textarea
@@ -696,3 +738,59 @@
     </div>
   </div>
 </div>
+
+<style>
+  .exp-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.2rem;
+    height: 1.2rem;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--color-muted);
+    cursor: pointer;
+    opacity: 0.5;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+  }
+  .exp-toggle:hover {
+    opacity: 1;
+    background: rgba(var(--accent-rgb), 0.12);
+  }
+  .exp-toggle-active {
+    opacity: 1;
+    color: var(--color-accent);
+    background: rgba(var(--accent-rgb), 0.15);
+  }
+  .exp-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.6875rem;
+  }
+  .exp-label {
+    color: var(--color-muted);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .exp-input {
+    flex: 1;
+    min-width: 0;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--bg-deep-rgb), 0.5);
+    color: var(--color-text);
+    font-size: 0.6875rem;
+    font-family: var(--font-mono, monospace);
+    outline: none;
+  }
+  .exp-input:focus {
+    border-color: var(--color-accent);
+  }
+  .exp-input-arm {
+    flex: 0 0 2.5rem;
+  }
+</style>

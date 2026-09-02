@@ -54,6 +54,54 @@ Copy `.env.example` to `.env` and set `OPENROUTER_API_KEY`. A $10 credit on Open
 - `packages/adaan-core/src/stores/settings.svelte.ts` — Reactive settings store (single localStorage blob)
 - `packages/adaan-core/src/stores/` — Svelte 5 rune stores (settings, theme, workspace, chat)
 
+## Phase 6 — Three-View Telemetry Dashboard (canonical data model)
+
+The telemetry canonical layer (`RequestRecord`/`TaskRecord` → `DailyRollup`) now carries the dimensions needed to split one data model into Paid / Free / Local regime views without three separate systems:
+
+- **`regime` + `provider` on `TaskRecord`**: derived in `AgentEngine.deriveRegime()` from the active provider — `local` when `provider.isLocalModel(model)` or a custom base URL is set, `free` for `:free` slugs on the default OpenRouter endpoint, `paid` otherwise. Re-derived after routing and on intra-task escalation so it reflects the effective model. Backfilled to `"free"`/`"paid"` (via `:free` suffix heuristic) on pre-Phase-6 records in `store.load()`.
+- **`requestedModel` vs `model`**: `requestedModel` is the pre-routing/pre-escalation model the user picked; `model` is the effective/final one. The provider's `model.fallback` event (429/503 failover) now updates `task.model` so the effective model is honest even mid-request — previously `task.model` stayed stale on failover and the per-model task rollup attributed work to the wrong model.
+- **`retries` + `fallbacks` on `TaskRecord`/`DailyRollup`**: same-model transient retries (429/503 with backoff) vs cross-model failovers. The provider emits a new `model.retry` event from its same-model retry path; the engine increments `task.retries`/`task.fallbacks` from `model.retry`/`model.fallback` in both the main loop and the summary turn. Rolled up into `DailyRollup.retries`/`fallbacks`.
+- **`quotaDailyLimit` in settings** (default 1000, schema v4): the free-regime daily request cap. Consumed = today's `DailyRollup.requests`. 0 disables the quota display. Used by the dashboard's quota bar.
+- **tok/s**: derived in the metrics layer from existing `RequestRecord.outputTokens`/`latencyMs` — no hardware probe needed.
+- **Reset Stats**: `TelemetryStore.reset()` wipes all records and persists immediately; `POST /api/telemetry/reset` exposes it. The TelemetryPanel header has a trash-icon button (with confirm) that clears local state and reloads.
+- **Refresh button fix**: the header's refresh `IconActivity` button was wired to `loadSummary` only and had **no `.icon-btn` CSS** in the component, so it rendered as an unstyled, near-invisible default `<button>` that looked dead. Now uses `IconRefresh`, has proper `.icon-btn` styles, and calls `refreshAll()` which reloads all four panels (summary + registry + capability + learn report).
+
+### Remaining Phase 6 work (not yet done)
+- **Phase 1**: `telemetry/metrics.ts` pure functions — `computeRegimeMetrics`, `computeModelMatrix` (N first-class, `lowConfidence` when n<3), `computeModelTable` + unit tests.
+- **Phase 2**: `GET /api/telemetry/regimes`, `GET /api/telemetry/models`; fix `/api/capability` to read `recentTasks` (currently reads nonexistent `_data().tasks` → always `[]`).
+- **Phase 3**: split `TelemetryPanel.svelte` (942 lines) into tab shell + `RegimeView`/`ModelsView`/`MatrixView`/`ExperimentsView`; Free tab hero = tasks/1k req + quota bar + requested-vs-effective model column; Matrix shows `96% (N=34)` per cell, dims n<3.
+- **Phase 4**: `experiment?: {name, arm}` on `TaskRecord` + tag input; `GET /api/telemetry/experiments` + `ExperimentsView` A/B table with Δ.
+
+## Phase 6 — Completed (Phases 1-4)
+
+All phases implemented. 325 tests pass, build clean.
+
+### Phase 1 — Pure metrics layer (`telemetry/metrics.ts`)
+- `computeRegimeMetrics(tasks, requests, regime, opts)` → `RegimeMetrics`: success rate, tasks/1k req, reqs/task, tokens/task, cost/task, p50/p95 latency, escalation/retry/fallback rates, quota consumed/remaining (free, from uncapped rollup via `quotaConsumedToday` opt), tasks/hour + tok/s + time/successful task (local).
+- `computeModelMatrix(tasks)` → `ModelMatrix`: cells with `{model, category, n, successes, rate, avgReqs, lowConfidence}` — **N first-class**, `lowConfidence: n < 3`.
+- `computeModelTable(tasks)` → `ModelRow[]`: global per-model rollup with N + lowConfidence.
+- 26 unit tests in `tests/metrics.test.ts`.
+
+### Phase 2 — API endpoints
+- `GET /api/telemetry/regimes?days=7` → `{paid, free, local}` bundles. Quota consumed from today's uncapped rollup (`quotaConsumedToday`), not the capped `recentRequests` ring.
+- `GET /api/telemetry/models` → global model table merging telemetry (`computeModelTable`) + registry tiers/pricing + learned stats sample counts.
+- **Fixed** `GET /api/capability` — was reading `_data().tasks` (nonexistent field, always `[]`); now reads `recentTasks`. Also returns `organic` matrix from `computeModelMatrix` alongside the legacy `matrix`.
+
+### Phase 3 — UI: one panel, six tabs
+- `TelemetryPanel.svelte` refactored from 942-line monolith into tab shell + 4 sub-components in `lib/components/telemetry/`:
+  - `RegimeView.svelte` — parameterized, used 3× (free/paid/local). Free tab: giant hero = tasks/1k req + quota bar (green→amber→red). Paid tab: cost/successful task, p95. Local tab: tasks/hour, tok/s, time/successful task. All share overview + reliability sections.
+  - `ModelsView.svelte` — global model table with N, success rate (color-coded), reqs/task, tokens/task, p50/p95, cost, esc/retry/fallback. Low-confidence rows dimmed.
+  - `MatrixView.svelte` — Model×Category grid with `96% (N=34)` per cell. Cells with n<3 are dimmed + italic. Color-coded good/mid/bad.
+  - `ExperimentsView.svelte` — A/B comparison table with Δ column (green = improvement, red = regression).
+- Recent tasks list on regime tabs shows requested→effective model shift when they differ.
+- Refresh button reloads all 5 data sources (summary + regimes + models + capability + experiments).
+
+### Phase 4 — Experiments
+- `experiment: {name, arm} | null` on `TaskRecord`/`ActiveTask`; backfilled to `null` on old records.
+- `engine.run()` accepts optional `experiment` param; session POST body passes it through.
+- `GET /api/telemetry/experiments` → groups by name+arm, computes per-arm metrics (n, successRate, avgReqs, avgTokens, avgLatency, avgCost).
+- `ExperimentsView.svelte` renders A/B table with Δ for success rate, reqs/task, tokens/task, latency, cost. Single-arm experiments show one column with a hint to add a second arm.
+
 ## Synthetic Progress (Phase 5 companion)
 
 Real reasoning/thought deltas only come from reasoning models, and during a true stall zero bytes arrive anyway — so they can't solve the "is it dead?" problem. The engine now emits synthetic progress signals so a stalled/queued request doesn't look like a dead empty bubble:

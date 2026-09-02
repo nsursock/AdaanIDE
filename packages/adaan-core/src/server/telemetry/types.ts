@@ -50,11 +50,23 @@ export interface RequestRecord {
 /** Outcome of a user task (one user message → agent done/error/cancelled). */
 export type TaskStatus = "success" | "error" | "cancelled";
 
+/** Economic regime a task ran under — drives the three dashboard views.
+ *  - `local`: routed to a local OpenAI-compatible server (Rapid-MLX, Ollama, …)
+ *  - `paid`: a non-free model on the default OpenRouter endpoint
+ *  - `free`: a free-tier model (`:free`) on the default OpenRouter endpoint */
+export type Regime = "paid" | "free" | "local";
+
 /** One user-task record. */
 export interface TaskRecord {
   taskId: string;
   sessionId: string;
+  /** Effective/final model that produced the task's output (post-routing,
+   *  post-escalation, post-failover). */
   model: string;
+  /** Phase 6: the model the user originally requested (pre-routing/escalation).
+   *  Diverges from `model` when auto-routing, intra-task escalation, or
+   *  provider failover switched models mid-task. */
+  requestedModel: string;
   /** First line / truncated first user message — for the recent-task list. */
   prompt: string;
   timestamp: number;
@@ -96,8 +108,20 @@ export interface TaskRecord {
   category: string | null;
   /** Phase 3: number of intra-task escalations. */
   escalations: number;
+  /** Phase 6: same-model retries (transient 429/503 with backoff, same model retried). */
+  retries: number;
+  /** Phase 6: cross-model failovers (switched to a different model after 429/503/402/404). */
+  fallbacks: number;
   /** Phase 4: implicit outcome signal (verified/accepted/silent/corrected/rejected/rolled_back). */
   outcome: string;
+  /** Phase 6: economic regime this task ran under (paid/free/local). */
+  regime: Regime;
+  /** Phase 6: provider id that served this task (e.g. "openrouter", "ollama", "rapid-mlx"). */
+  provider: string;
+  /** Phase 6: optional experiment tag — {name, arm} — for A/B testing agent
+   *  configurations (prompt variants, tool sets, router variants, etc.).
+   *  Set via the session POST body; null when not part of an experiment. */
+  experiment: { name: string; arm: string } | null;
 }
 
 /** Per-model empirical stats for a single day — the capability-matrix seed. */
@@ -156,6 +180,10 @@ export interface DailyRollup {
   escalations: number;
   /** Phase 3: tasks that succeeded after ≥1 escalation. */
   escalationSuccesses: number;
+  /** Phase 6: total same-model retries across all tasks. */
+  retries: number;
+  /** Phase 6: total cross-model failovers across all tasks. */
+  fallbacks: number;
   /** Total task duration in ms. */
   totalTaskDurationMs: number;
   perModel: Record<string, ModelDailyStats>;

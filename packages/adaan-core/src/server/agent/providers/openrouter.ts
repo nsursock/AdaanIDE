@@ -109,8 +109,9 @@ export class OpenRouterProvider implements LLMProvider {
     this.localModels = new Set(models);
   }
 
-  /** Check if a model should be routed to the local endpoint. */
-  private isLocalModel(model: string): boolean {
+  /** Check if a model should be routed to the local endpoint. Public so the
+   *  engine can derive the telemetry `regime` (local vs paid/free). */
+  isLocalModel(model: string): boolean {
     if (!this.localEndpoint) return false;
     // Exact match
     if (this.localModels.has(model)) return true;
@@ -119,6 +120,11 @@ export class OpenRouterProvider implements LLMProvider {
     // Local models from Rapid-MLX are "mlx-community/..." or aliases like "qwen3.5-4b-4bit"
     // But we only route to local if we know the model is local (in the set)
     return false;
+  }
+
+  /** Whether the provider's primary endpoint is a custom (non-OpenRouter) URL. */
+  hasCustomBaseUrl(): boolean {
+    return this.baseUrl !== OPENROUTER_BASE;
   }
 
   /** Get the base URL for a given model — local endpoint for local models,
@@ -231,6 +237,12 @@ export class OpenRouterProvider implements LLMProvider {
         const transient = statusCode === 429 || statusCode === 503;
         if (transient && !retried.has(currentModel)) {
           retried.add(currentModel);
+          // Surface the same-model retry so the engine can count it in
+          // telemetry (retries vs cross-model fallbacks).
+          yield {
+            type: "model.retry",
+            data: { model: currentModel, reason: e.message ?? String(statusCode) },
+          };
           try {
             await sleep(this.retryDelayMs, options.signal);
           } catch {

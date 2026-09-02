@@ -19,6 +19,7 @@ export async function POST({ request }) {
     explorationPaidEnabled,
     interrupt,
     localModel,
+    experiment,
   } = await request.json();
 
   if (!workspaceRoot || !message) {
@@ -104,7 +105,12 @@ export async function POST({ request }) {
 
   // Start the agent run as a background task — events are consumed via SSE.
   // session.resume() (called inside engine.run) aborts any in-flight turn.
-  const iterable = engine.run(session, ws, message, wireModel, contextLength || 4096);
+  const iterable = engine.run(
+    session, ws, message, wireModel, contextLength || 4096,
+    experiment && typeof experiment.name === "string" && typeof experiment.arm === "string"
+      ? { name: experiment.name, arm: experiment.arm }
+      : null,
+  );
 
   // Store the iterable on the session for the events endpoint to consume
   (session as any)._iterable = iterable;

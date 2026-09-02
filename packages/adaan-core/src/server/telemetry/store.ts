@@ -11,6 +11,7 @@ import type {
   TelemetryData,
   TelemetrySummary,
   RequestType,
+  Regime,
 } from "./types.js";
 import { isUpgrade, type Outcome } from "../learn/outcome.js";
 
@@ -52,6 +53,8 @@ function emptyRollup(day: string): DailyRollup {
     autoRoutedTasks: 0,
     escalations: 0,
     escalationSuccesses: 0,
+    retries: 0,
+    fallbacks: 0,
     totalTaskDurationMs: 0,
     perModel: {},
   };
@@ -81,6 +84,8 @@ export interface ActiveTask {
   taskId: string;
   sessionId: string;
   model: string;
+  /** Phase 6: model the user originally requested (pre-routing/escalation). */
+  requestedModel: string;
   prompt: string;
   startedAt: number;
   day: string;
@@ -113,8 +118,18 @@ export interface ActiveTask {
   category: string | null;
   /** Phase 3: number of intra-task escalations. */
   escalations: number;
+  /** Phase 6: same-model retries (transient 429/503 backoff). */
+  retries: number;
+  /** Phase 6: cross-model failovers. */
+  fallbacks: number;
   /** Phase 4: implicit outcome signal. */
   outcome: string;
+  /** Phase 6: economic regime this task ran under. */
+  regime: Regime;
+  /** Phase 6: provider id that served this task. */
+  provider: string;
+  /** Phase 6: optional experiment tag for A/B testing. */
+  experiment: { name: string; arm: string } | null;
   /** Phase 4: test results from run_tests (for outcome detection). */
   testResults: unknown[];
   /** Tracks whether the previous iteration ended in a tool error, to classify
@@ -165,10 +180,23 @@ export class TelemetryStore {
           if (r.autoRoutedTasks === undefined) r.autoRoutedTasks = 0;
           if (r.escalations === undefined) r.escalations = 0;
           if (r.escalationSuccesses === undefined) r.escalationSuccesses = 0;
+          if (r.retries === undefined) r.retries = 0;
+          if (r.fallbacks === undefined) r.fallbacks = 0;
         }
         // Phase 4: backfill outcome on recent tasks
         for (const t of parsed.recentTasks) {
           if (!t.outcome) t.outcome = t.status === "success" ? "silent" : "rejected";
+          // Phase 6: backfill regime/provider on pre-Phase-6 tasks.
+          if (!t.regime) {
+            // Pre-Phase-6 free-tier slugs ended in ":free"; anything else was paid.
+            t.regime = t.model.endsWith(":free") ? "free" : "paid";
+          }
+          if (!t.provider) t.provider = "openrouter";
+          // Phase 6: backfill requestedModel — pre-Phase-6 tasks didn't track it.
+          if (!t.requestedModel) t.requestedModel = t.model;
+          if (t.retries === undefined) t.retries = 0;
+          if (t.fallbacks === undefined) t.fallbacks = 0;
+          if (!t.experiment) t.experiment = null;
         }
         this.data = {
           version: 1,
@@ -201,12 +229,23 @@ export class TelemetryStore {
   }
 
   /** Begin tracking a user task. Returns the active-task handle. */
-  startTask(sessionId: string, model: string, prompt: string): ActiveTask {
+  startTask(
+    sessionId: string,
+    model: string,
+    prompt: string,
+    opts: {
+      regime?: Regime;
+      provider?: string;
+      requestedModel?: string;
+      experiment?: { name: string; arm: string } | null;
+    } = {},
+  ): ActiveTask {
     const taskId = randomUUID();
     const task: ActiveTask = {
       taskId,
       sessionId,
       model,
+      requestedModel: opts.requestedModel ?? model,
       prompt: prompt.slice(0, 160),
       startedAt: this.now(),
       day: todayStr(new Date(this.now())),
@@ -232,7 +271,12 @@ export class TelemetryStore {
       routedBy: "manual",
       category: null,
       escalations: 0,
+      retries: 0,
+      fallbacks: 0,
       outcome: "silent",
+      regime: opts.regime ?? "free",
+      provider: opts.provider ?? "openrouter",
+      experiment: opts.experiment ?? null,
       testResults: [],
       lastIterationHadError: false,
       anyToolSuccess: false,
@@ -370,6 +414,7 @@ export class TelemetryStore {
       taskId: task.taskId,
       sessionId: task.sessionId,
       model: task.model,
+      requestedModel: task.requestedModel,
       prompt: task.prompt,
       timestamp: task.startedAt,
       day: task.day,
@@ -397,7 +442,12 @@ export class TelemetryStore {
       routedBy: task.routedBy,
       category: task.category,
       escalations: task.escalations,
+      retries: task.retries,
+      fallbacks: task.fallbacks,
       outcome: task.outcome,
+      regime: task.regime,
+      provider: task.provider,
+      experiment: task.experiment,
     };
     this.active.delete(task.taskId);
     this.data.recentTasks.unshift(rec);
@@ -421,6 +471,8 @@ export class TelemetryStore {
     if (rec.routedBy === "auto") rollup.autoRoutedTasks++;
     rollup.escalations += rec.escalations;
     if (rec.escalations > 0 && status === "success") rollup.escalationSuccesses++;
+    rollup.retries += rec.retries;
+    rollup.fallbacks += rec.fallbacks;
     rollup.totalTaskDurationMs += rec.durationMs;
 
     const ms = rollup.perModel[task.model] ?? emptyModelStats(task.model);
@@ -525,6 +577,16 @@ export class TelemetryStore {
 
   /** Expose raw data — used by tests. */
   _data(): TelemetryData {
+    return this.data;
+  }
+
+  /** Phase 6: wipe all telemetry (recent tasks, recent requests, rollups).
+   *  Persists immediately so a fresh dashboard reflects the reset. In-flight
+   *  active tasks are left alone — they'll flush into the empty store on
+   *  completion. Returns the (now empty) data snapshot. */
+  async reset(): Promise<TelemetryData> {
+    this.data = { version: 1, recentTasks: [], recentRequests: [], rollups: {} };
+    await this.flush();
     return this.data;
   }
 }

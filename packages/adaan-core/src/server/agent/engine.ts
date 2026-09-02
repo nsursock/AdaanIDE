@@ -94,6 +94,28 @@ export class AgentEngine {
     this.systemPrompt = opts.systemPrompt ?? SYSTEM_PROMPT;
   }
 
+  /** Phase 6: derive the economic regime for a task from the active provider
+   *  and model id. Local endpoint → "local"; free-tier slug (`:free`) → "free";
+   *  anything else on the default OpenRouter endpoint → "paid". */
+  private deriveRegime(model: string): "paid" | "free" | "local" {
+    const p = this.provider as {
+      isLocalModel?: (m: string) => boolean;
+      hasCustomBaseUrl?: () => boolean;
+    };
+    if (p.isLocalModel?.(model)) return "local";
+    // A custom primary baseUrl with no local endpoint mapping means every
+    // request goes to a local-compatible server → treat as local.
+    if (p.hasCustomBaseUrl?.()) return "local";
+    return model.endsWith(":free") ? "free" : "paid";
+  }
+
+  /** Phase 6: best-effort provider id for telemetry. Falls back to "openrouter". */
+  private deriveProvider(model: string): string {
+    const p = this.provider as { isLocalModel?: (m: string) => boolean; hasCustomBaseUrl?: () => boolean };
+    if (p.isLocalModel?.(model) || p.hasCustomBaseUrl?.()) return "local";
+    return "openrouter";
+  }
+
   /**
    * Run the agent loop for a session.
    * Emits events to the provided callback as an async generator.
@@ -104,6 +126,7 @@ export class AgentEngine {
     userMessage: string,
     model: string | undefined,
     contextLength: number,
+    experiment?: { name: string; arm: string } | null,
   ): AsyncIterable<AgentEvent> {
     // A turn may start without an explicit model (manual routing, nothing
     // selected). Resolve that to the provider's default pick up front so the
@@ -152,7 +175,13 @@ export class AgentEngine {
       }
     }
 
-    const task = telemetryStore.startTask(session.id, model, userMessage);
+    const requestedModel = model;
+    const task = telemetryStore.startTask(session.id, model, userMessage, {
+      regime: this.deriveRegime(model),
+      provider: this.deriveProvider(model),
+      requestedModel,
+      experiment: experiment ?? null,
+    });
     let taskStatus: "success" | "error" | "cancelled" = "success";
     let taskFinalized = false;
 
@@ -200,6 +229,9 @@ export class AgentEngine {
         model = (this.provider as { pickModel?: () => string }).pickModel?.() ?? model ?? "auto";
       }
     }
+    // Re-derive regime now that routing may have changed the effective model.
+    task.regime = this.deriveRegime(model);
+    task.provider = this.deriveProvider(model);
     const finalizeTask = (): TaskSummaryData => {
       if (taskFinalized) return {} as TaskSummaryData;
       taskFinalized = true;
@@ -452,7 +484,20 @@ export class AgentEngine {
               }
               case "model.fallback": {
                 const data = ev.data as { from: string; to: string; reason: string };
+                // The provider switched models mid-request (429/503 failover).
+                // Update the task's effective model so telemetry records the
+                // model that actually produced the reply, not the one the user
+                // originally picked.
+                task.model = data.to;
+                task.regime = this.deriveRegime(data.to);
+                task.fallbacks++;
                 yield emit("model.fallback", data);
+                break;
+              }
+              case "model.retry": {
+                const data = ev.data as { model: string; reason: string };
+                task.retries++;
+                yield emit("model.retry", data);
                 break;
               }
               case "error": {
@@ -940,6 +985,8 @@ export class AgentEngine {
               model = nextModels[0].id;
               consecutiveErrors = 0;
               task.escalations++;
+              // Escalation may cross regimes (free → paid); keep regime honest.
+              task.regime = this.deriveRegime(model);
               yield emit("model.escalated", {
                 from: oldModel,
                 to: model,
@@ -1063,6 +1110,16 @@ export class AgentEngine {
           } else if (ev.type === "finish") {
             const data = ev.data as { usage?: typeof summaryUsage };
             if (data.usage) summaryUsage = data.usage;
+          } else if (ev.type === "model.fallback") {
+            const data = ev.data as { from: string; to: string; reason: string };
+            task.model = data.to;
+            task.regime = this.deriveRegime(data.to);
+            task.fallbacks++;
+            yield emit("model.fallback", data);
+          } else if (ev.type === "model.retry") {
+            const data = ev.data as { model: string; reason: string };
+            task.retries++;
+            yield emit("model.retry", data);
           } else if (ev.type === "error") {
             const data = ev.data as { message: string };
             telemetryStore.recordRequest(task, {

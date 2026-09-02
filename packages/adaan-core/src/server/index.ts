@@ -34,11 +34,22 @@ export type {
   TokenUsage,
   RequestRecord,
   TaskStatus,
+  Regime,
   TaskRecord,
   ModelDailyStats,
   DailyRollup,
   TelemetryData,
   TelemetrySummary,
+} from "./telemetry/index.js";
+export {
+  computeRegimeMetrics,
+  computeModelMatrix,
+  computeModelTable,
+  type RegimeMetrics,
+  type RegimeMetricsOpts,
+  type MatrixCell,
+  type ModelMatrix,
+  type ModelRow,
 } from "./telemetry/index.js";
 export { ModelRegistry, modelRegistry } from "./registry/index.js";
 export type { RegistryEntry, RegistryData, ModelTier } from "./registry/index.js";
