@@ -7,7 +7,7 @@ import type { ThemeId } from "../types.js";
 import { DEFAULT_THEME, THEME_IDS } from "../themes.js";
 
 /** Bump when the persisted shape changes; `migrateBlob` always rewrites to this. */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 3;
 
 /** Single localStorage key holding the whole settings blob as JSON. */
 export const STORAGE_KEY = "adaan.settings.v1";
@@ -51,6 +51,13 @@ export interface Settings {
    * acceptable for a local-first IDE but not for a hosted multi-user app.
    */
   openrouterApiKey: string | null;
+  /**
+   * Custom OpenAI-compatible endpoint base URL (e.g. a local Rapid-MLX
+   * server at http://localhost:8000/v1). When null/empty, the default
+   * OpenRouter endpoint is used. Local servers typically need no API key
+   * (any non-empty placeholder works).
+   */
+  providerBaseUrl: string | null;
   /** Phase 3: adaptive routing mode — "auto" routes by task complexity, "manual" keeps the user's pick. */
   routingMode: "auto" | "manual";
   /** Phase 3: minimum empirical task success rate to trust a model (0..1). */
@@ -61,6 +68,19 @@ export interface Settings {
   learningEnabled: boolean;
   /** Phase 4: whether exploration can spend paid requests (default off). */
   explorationPaidEnabled: boolean;
+  /** When true (default), only one local model server may run at a time —
+   *  starting a new one stops all others. When false, multiple servers
+   *  can run simultaneously on their respective ports. */
+  singleLocalModel: boolean;
+  /** User-defined display aliases for discovered local models, keyed by
+   *  `modelAliasKey(providerId, modelId)`. Shown in the model selector
+   *  instead of the raw model name. */
+  modelAliases: Record<string, string>;
+}
+
+/** Build the stable key used in `modelAliases` for a discovered local model. */
+export function modelAliasKey(providerId: string, modelId: string): string {
+  return `${providerId}/${modelId}`;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -74,11 +94,14 @@ export const DEFAULT_SETTINGS: Settings = {
   selectedModelId: null,
   threeEnabled: true,
   openrouterApiKey: null,
+  providerBaseUrl: null,
   routingMode: "manual",
   routingThreshold: 0.6,
   routingTiers: ["free", "mid", "frontier"],
   learningEnabled: true,
   explorationPaidEnabled: false,
+  singleLocalModel: true,
+  modelAliases: {},
 };
 
 function clamp(n: number, min: number, max: number): number {
@@ -96,6 +119,17 @@ function safeTerminalMode(value: unknown): TerminalMode {
   return typeof value === "string" && (TERMINAL_MODES as string[]).includes(value)
     ? (value as TerminalMode)
     : "full";
+}
+
+/** Sanitize the persisted model-aliases map — keep only non-empty string
+ *  values so a corrupt blob can never inject garbage into the UI. */
+function safeAliases(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === "string" && v.trim()) out[k] = v.trim();
+  }
+  return out;
 }
 
 /**
@@ -140,6 +174,12 @@ export function migrateBlob(raw: unknown): Settings {
         : obj.openrouterApiKey === null
           ? null
           : DEFAULT_SETTINGS.openrouterApiKey,
+    providerBaseUrl:
+      typeof obj.providerBaseUrl === "string"
+        ? obj.providerBaseUrl
+        : obj.providerBaseUrl === null
+          ? null
+          : DEFAULT_SETTINGS.providerBaseUrl,
     routingMode:
       obj.routingMode === "auto" || obj.routingMode === "manual"
         ? obj.routingMode
@@ -156,6 +196,9 @@ export function migrateBlob(raw: unknown): Settings {
       typeof obj.learningEnabled === "boolean" ? obj.learningEnabled : DEFAULT_SETTINGS.learningEnabled,
     explorationPaidEnabled:
       typeof obj.explorationPaidEnabled === "boolean" ? obj.explorationPaidEnabled : DEFAULT_SETTINGS.explorationPaidEnabled,
+    singleLocalModel:
+      typeof obj.singleLocalModel === "boolean" ? obj.singleLocalModel : DEFAULT_SETTINGS.singleLocalModel,
+    modelAliases: safeAliases(obj.modelAliases),
   };
 }
 

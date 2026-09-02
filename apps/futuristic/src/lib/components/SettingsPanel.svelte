@@ -14,6 +14,7 @@
     DEFAULT_SIDEBAR_W,
     DEFAULT_CHAT_W,
     DEFAULT_TERMINAL_H,
+    modelAliasKey,
     type ThemePalette,
   } from "@adaan/core";
   import { fly, fade } from "svelte/transition";
@@ -38,14 +39,33 @@
 
   let { open = $bindable(false) } = $props();
 
-  type TabId = "general" | "themes";
+  type TabId = "general" | "themes" | "models";
   let activeTab = $state<TabId>("general");
 
   let apiKeyInput = $state("");
   let showKey = $state(false);
   let keySaved = $state(false);
   let keyError = $state<string | null>(null);
+  let baseUrlInput = $state("");
+  let baseUrlSaved = $state(false);
   let copiedHex = $state<string | null>(null);
+
+  // --- Models tab state ---
+  interface LocalProviderState {
+    id: string;
+    name: string;
+    installed: boolean;
+    models: Array<{ id: string; name: string; size?: string; hfRepo?: string }>;
+    serverRunning: boolean;
+    endpoint: string;
+    port: number;
+    servedModel: string | null;
+  }
+  let localProviders = $state<LocalProviderState[]>([]);
+  let providersLoading = $state(false);
+  let providersError = $state<string | null>(null);
+  let servingModel = $state<string | null>(null);
+  let serveModelError = $state<string | null>(null);
 
   const BASE_LABELS: { key: keyof ThemePalette["base"]; label: string }[] = [
     { key: "bg", label: "Background" },
@@ -72,6 +92,15 @@
       apiKeyInput = settingsStore.settings.openrouterApiKey ?? "";
       keySaved = false;
       keyError = null;
+      baseUrlInput = settingsStore.settings.providerBaseUrl ?? "";
+      baseUrlSaved = false;
+    }
+  });
+
+  // Load local providers when the Models tab is first opened.
+  $effect(() => {
+    if (open && activeTab === "models" && localProviders.length === 0 && !providersLoading) {
+      loadProviders();
     }
   });
 
@@ -105,21 +134,24 @@
 
   async function saveApiKey() {
     keyError = null;
-    const trimmed = apiKeyInput.trim();
+    const trimmedKey = apiKeyInput.trim();
+    const trimmedUrl = baseUrlInput.trim();
     try {
       const res = await fetch("/api/settings/api-key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: trimmed }),
+        body: JSON.stringify({ apiKey: trimmedKey, baseUrl: trimmedUrl }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        keyError = data.error ?? "Failed to save API key";
+        keyError = data.error ?? "Failed to save provider settings";
         return;
       }
-      settingsStore.setOpenrouterApiKey(trimmed || null);
+      settingsStore.setOpenrouterApiKey(trimmedKey || null);
+      settingsStore.setProviderBaseUrl(trimmedUrl || null);
       keySaved = true;
-      setTimeout(() => (keySaved = false), 2000);
+      baseUrlSaved = true;
+      setTimeout(() => { keySaved = false; baseUrlSaved = false; }, 2000);
     } catch (e) {
       keyError = e instanceof Error ? e.message : "Network error";
     }
@@ -133,7 +165,7 @@
       await fetch("/api/settings/api-key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: "" }),
+        body: JSON.stringify({ apiKey: "", baseUrl: baseUrlInput.trim() }),
       });
     } catch {
       // best-effort
@@ -141,9 +173,87 @@
     settingsStore.setOpenrouterApiKey(null);
   }
 
+  async function resetBaseUrl() {
+    baseUrlInput = "";
+    keyError = null;
+    try {
+      await fetch("/api/settings/api-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: apiKeyInput.trim(), baseUrl: "" }),
+      });
+    } catch {
+      // best-effort
+    }
+    settingsStore.setProviderBaseUrl(null);
+  }
+
+  // --- Models tab functions ---
+
+  async function loadProviders() {
+    providersLoading = true;
+    providersError = null;
+    try {
+      const res = await fetch("/api/local/providers");
+      if (res.ok) {
+        const data = await res.json();
+        localProviders = data.providers ?? [];
+      } else {
+        providersError = "Failed to load local providers";
+      }
+    } catch {
+      providersError = "Network error";
+    } finally {
+      providersLoading = false;
+    }
+  }
+
+  async function serveModel(providerId: string, modelId: string) {
+    servingModel = `${providerId}/${modelId}`;
+    serveModelError = null;
+    try {
+      const res = await fetch("/api/local/serve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          providerId,
+          modelId,
+          singleModel: settingsStore.settings.singleLocalModel,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        serveModelError = data.error ?? "Failed to start server";
+      } else {
+        // The serve endpoint configures the provider's local routing
+        // server-side — no need to persist a baseUrl in settings.
+        // Refresh provider list to show running status.
+        await loadProviders();
+      }
+    } catch (e) {
+      serveModelError = e instanceof Error ? e.message : "Network error";
+    } finally {
+      servingModel = null;
+    }
+  }
+
+  async function stopProviderServer(providerId: string) {
+    try {
+      await fetch("/api/local/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerId }),
+      });
+      await loadProviders();
+    } catch {
+      // best-effort
+    }
+  }
+
   function resetAll() {
     settingsStore.reset();
     apiKeyInput = "";
+    baseUrlInput = "";
     showKey = false;
     // Re-apply the default theme to the DOM immediately.
     themeStore.init();
@@ -192,6 +302,15 @@
       >
         <IconPalette size={13} />
         <span>Themes</span>
+      </button>
+      <button
+        class="settings-tab {activeTab === 'models' ? 'active' : ''}"
+        role="tab"
+        aria-selected={activeTab === "models"}
+        onclick={() => (activeTab = "models")}
+      >
+        <IconCpu size={13} />
+        <span>Models</span>
       </button>
     </div>
 
@@ -265,6 +384,131 @@
         <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-2">
           Click a color to copy its hex code.
         </div>
+      </section>
+      {:else if activeTab === "models"}
+      <!-- Models tab: local provider discovery + serve controls -->
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <IconCpu size={14} class="text-[var(--color-accent)]" />
+          <span>Local Model Providers</span>
+          <button
+            class="icon-btn ml-auto"
+            onclick={loadProviders}
+            disabled={providersLoading}
+            title="Refresh"
+            aria-label="Refresh providers"
+          >
+            <IconRefresh size={13} class={providersLoading ? 'animate-spin' : ''} />
+          </button>
+        </div>
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed">
+          Detected runtimes on this Mac. Click a model to serve it — the IDE auto-connects to the local endpoint.
+        </div>
+
+        <label class="settings-row cursor-pointer mt-2">
+          <div>
+            <div class="text-xs font-semibold">One model at a time</div>
+            <div class="text-[0.6875rem] text-[var(--color-muted)]">Stop other local servers when starting a new model. Disable on machines with enough RAM to hold multiple models simultaneously (each provider uses its own port).</div>
+          </div>
+          <button
+            class="toggle {settingsStore.settings.singleLocalModel ? 'on' : ''}"
+            onclick={() => settingsStore.setSingleLocalModel(!settingsStore.settings.singleLocalModel)}
+            role="switch"
+            aria-checked={settingsStore.settings.singleLocalModel}
+            aria-label="Toggle one model at a time"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </label>
+
+        {#if providersError}
+          <div class="text-[0.6875rem] text-[var(--color-error)] mt-2">{providersError}</div>
+        {/if}
+
+        {#if providersLoading && localProviders.length === 0}
+          <div class="text-[0.75rem] text-[var(--color-muted)] mt-3 opacity-70">Scanning for providers…</div>
+        {/if}
+
+        {#if serveModelError}
+          <div class="text-[0.6875rem] text-[var(--color-error)] mt-2">{serveModelError}</div>
+        {/if}
+
+        {#each localProviders as provider (provider.id)}
+          <div class="mt-3 p-3 rounded-lg border border-[var(--color-border)] bg-[rgba(var(--surface-1-rgb),0.3)]">
+            <!-- Provider header -->
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-semibold">{provider.name}</span>
+                {#if !provider.installed}
+                  <span class="text-[0.625rem] text-[var(--color-muted)] opacity-60">not installed</span>
+                {:else if provider.serverRunning}
+                  <span class="text-[0.625rem] px-1.5 py-0.5 rounded bg-[rgba(var(--success-rgb),0.15)] text-[var(--color-success)] font-mono border border-[rgba(var(--success-rgb),0.25)]">running :{provider.port}</span>
+                {:else}
+                  <span class="text-[0.625rem] px-1.5 py-0.5 rounded bg-[rgba(var(--muted-rgb),0.1)] text-[var(--color-muted)] font-mono border border-[var(--color-border)]">stopped :{provider.port}</span>
+                {/if}
+              </div>
+              {#if provider.serverRunning && provider.installed}
+                <button class="settings-link-btn" onclick={() => stopProviderServer(provider.id)}>Stop</button>
+              {/if}
+            </div>
+
+            <!-- Model list -->
+            {#if provider.installed && provider.models.length > 0}
+              <div class="mt-2 space-y-1">
+                {#each provider.models as model (model.id)}
+                  {@const alias = settingsStore.settings.modelAliases[modelAliasKey(provider.id, model.id)] ?? ""}
+                  <div class="py-1.5 px-2 rounded hover:bg-[rgba(var(--accent-rgb),0.06)] transition-colors">
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="flex items-center gap-2 min-w-0">
+                        <span class="text-[0.75rem] truncate">{alias || model.name}</span>
+                        {#if alias}
+                          <span class="text-[0.625rem] text-[var(--color-muted)] font-mono truncate opacity-60 flex-shrink min-w-0">{model.name}</span>
+                        {/if}
+                        {#if model.size}
+                          <span class="text-[0.625rem] text-[var(--color-muted)] font-mono flex-shrink-0">{model.size}</span>
+                        {/if}
+                        {#if provider.servedModel === model.id || provider.servedModel === model.name || provider.servedModel === model.hfRepo}
+                          <span class="text-[0.625rem] text-[var(--color-accent)] flex-shrink-0">● served</span>
+                        {/if}
+                      </div>
+                      {#if servingModel === `${provider.id}/${model.id}`}
+                        <span class="text-[0.625rem] text-[var(--color-accent)] flex items-center gap-1 flex-shrink-0">
+                          <span class="inline-block w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] animate-pulse"></span>
+                          starting…
+                        </span>
+                      {:else}
+                        <button
+                          class="settings-link-btn text-[0.6875rem] flex-shrink-0"
+                          onclick={() => serveModel(provider.id, model.id)}
+                        >
+                          Serve
+                        </button>
+                      {/if}
+                    </div>
+                    <input
+                      type="text"
+                      class="alias-input mt-1"
+                      placeholder="alias — friendly name shown in the model selector"
+                      value={alias}
+                      onchange={(e) => settingsStore.setModelAlias(provider.id, model.id, e.currentTarget.value)}
+                      spellcheck="false"
+                      autocomplete="off"
+                      aria-label="Alias for {model.name}"
+                    />
+                  </div>
+                {/each}
+              </div>
+            {:else if provider.installed}
+              <div class="text-[0.6875rem] text-[var(--color-muted)] mt-2 opacity-60">No models installed. Use the provider's CLI to download one.</div>
+            {/if}
+          </div>
+        {/each}
+
+        {#if !providersLoading && localProviders.length > 0 && localProviders.every((p) => !p.installed)}
+          <div class="text-[0.75rem] text-[var(--color-muted)] mt-3 opacity-70">
+            No local providers found. Install <a href="https://ollama.com" target="_blank" rel="noopener" class="text-[var(--color-accent)] underline">Ollama</a>, <a href="https://rapidmlx.com" target="_blank" rel="noopener" class="text-[var(--color-accent)] underline">Rapid-MLX</a>, or <a href="https://lmstudio.ai" target="_blank" rel="noopener" class="text-[var(--color-accent)] underline">LM Studio</a> to use local models.
+          </div>
+        {/if}
       </section>
       {:else}
       <!-- Layout -->
@@ -421,7 +665,7 @@
       <section class="settings-section">
         <div class="settings-section-title">
           <IconKey size={14} class="text-[var(--color-accent)]" />
-          <span>OpenRouter API Key</span>
+          <span>Provider · API Key &amp; Endpoint</span>
         </div>
         <div class="settings-key-row">
           <input
@@ -442,19 +686,36 @@
             {#if showKey}<IconEyeOff size={14} />{:else}<IconEye size={14} />{/if}
           </button>
         </div>
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1.5">
+          API key — stored locally and sent to the server on save. Falls back to the <code class="font-mono">OPENROUTER_API_KEY</code> env var when empty. Get one at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener" class="text-[var(--color-accent)] underline">openrouter.ai/keys</a>. Leave empty for a local endpoint (no key needed).
+        </div>
+        <div class="settings-key-row mt-3">
+          <input
+            type="text"
+            class="settings-key-input"
+            placeholder="https://openrouter.ai/api/v1"
+            value={baseUrlInput}
+            oninput={(e) => { baseUrlInput = e.currentTarget.value; baseUrlSaved = false; keyError = null; }}
+            spellcheck="false"
+            autocomplete="off"
+          />
+        </div>
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1.5">
+          Endpoint base URL — point at any OpenAI-compatible server to use a local model. For <a href="https://rapidmlx.com" target="_blank" rel="noopener" class="text-[var(--color-accent)] underline">Rapid-MLX</a> run <code class="font-mono">rapid-mlx serve &lt;model&gt;</code> and set this to <code class="font-mono">http://localhost:8000/v1</code>. Empty = default OpenRouter. Also settable via the <code class="font-mono">OPENROUTER_BASE_URL</code> env var.
+        </div>
         <div class="flex items-center gap-2 mt-2">
-          <button class="settings-link-btn" onclick={saveApiKey} disabled={!apiKeyInput.trim()}>
-            {#if keySaved}<IconCheck size={12} /> Saved{:else}Save key{/if}
+          <button class="settings-link-btn" onclick={saveApiKey} disabled={!apiKeyInput.trim() && !baseUrlInput.trim()}>
+            {#if keySaved || baseUrlSaved}<IconCheck size={12} /> Saved{:else}Save{/if}
           </button>
           {#if settingsStore.settings.openrouterApiKey || apiKeyInput}
-            <button class="settings-link-btn" onclick={clearApiKey}>Clear</button>
+            <button class="settings-link-btn" onclick={clearApiKey}>Clear key</button>
+          {/if}
+          {#if settingsStore.settings.providerBaseUrl || baseUrlInput}
+            <button class="settings-link-btn" onclick={resetBaseUrl}>Reset endpoint</button>
           {/if}
           {#if keyError}
             <span class="text-[0.6875rem] text-[var(--color-error)]">{keyError}</span>
           {/if}
-        </div>
-        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-2">
-          Stored locally in your browser and sent to the server on save. Falls back to the <code class="font-mono">OPENROUTER_API_KEY</code> env var when empty. Get a key at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener" class="text-[var(--color-accent)] underline">openrouter.ai/keys</a>.
         </div>
       </section>
 
@@ -752,6 +1013,29 @@
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+
+  .alias-input {
+    width: 100%;
+    min-width: 0;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.6875rem;
+    font-family: var(--font-mono, monospace);
+    color: var(--color-text);
+    background: rgba(var(--bg-deep-rgb), 0.4);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .alias-input::placeholder {
+    color: var(--color-muted);
+    opacity: 0.55;
+    font-family: inherit;
+  }
+  .alias-input:focus {
+    border-color: var(--color-accent);
+    box-shadow: var(--glow-accent);
   }
 
   .settings-footer {

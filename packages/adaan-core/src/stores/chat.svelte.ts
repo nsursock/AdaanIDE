@@ -82,7 +82,7 @@ class ChatStore {
   restoreModel(models: ModelGroups): boolean {
     const id = settingsStore.settings.selectedModelId;
     if (!id) return false;
-    const all = [...models.free, ...models.paid];
+    const all = [...models.free, ...models.paid, ...(models.local ?? [])];
     const found = all.find((m) => m.id === id);
     if (found) {
       // Set directly to avoid re-persisting the same id.

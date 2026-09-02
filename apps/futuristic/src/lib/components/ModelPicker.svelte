@@ -1,9 +1,13 @@
 <script lang="ts">
-  import type { ModelInfo } from "@adaan/core";
+  import type { ModelInfo, LocalModelInfo } from "@adaan/core";
   import { chatStore } from "@adaan/core";
   import { IconChevronDown, IconCpu, IconCheck, IconSearch } from "@tabler/icons-svelte";
 
-  let { models } = $props<{ models: { free: ModelInfo[]; paid: ModelInfo[] } }>();
+  let { models, onSelectLocal, onSelect } = $props<{
+    models: { free: ModelInfo[]; paid: ModelInfo[]; local?: LocalModelInfo[] };
+    onSelectLocal?: (model: LocalModelInfo) => void;
+    onSelect?: (model: ModelInfo) => void;
+  }>();
   let open = $state(false);
   let query = $state("");
   let menuEl = $state<HTMLDivElement | null>(null);
@@ -15,7 +19,20 @@
   let freeBarGone = $state(false);
 
   function select(model: ModelInfo) {
-    chatStore.setModel(model);
+    if (onSelect) {
+      onSelect(model);
+    } else {
+      chatStore.setModel(model);
+    }
+    open = false;
+  }
+
+  function selectLocal(model: LocalModelInfo) {
+    if (onSelectLocal) {
+      onSelectLocal(model);
+    } else {
+      chatStore.setModel(model);
+    }
     open = false;
   }
 
@@ -25,14 +42,24 @@
     return `${ctx}`;
   }
 
+  /** Display name — user-defined alias wins over the raw model name. */
+  function displayName(m: ModelInfo): string {
+    return m.alias || m.name;
+  }
+
   function matches(m: ModelInfo): boolean {
     if (!query) return true;
     const q = query.toLowerCase();
-    return m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q);
+    return (
+      displayName(m).toLowerCase().includes(q) ||
+      m.name.toLowerCase().includes(q) ||
+      m.id.toLowerCase().includes(q)
+    );
   }
 
   const filteredFree = $derived(models.free.filter(matches));
   const filteredPaid = $derived(models.paid.filter(matches));
+  const filteredLocal = $derived((models.local ?? []).filter(matches));
 
   // Keep the search bar pinned, the group labels pinned just below it, and
   // fade the free label out (with a slide) the moment the paid label arrives
@@ -78,7 +105,7 @@
     <div class="truncate flex items-center gap-2 min-w-0">
       <IconCpu size={14} class="text-[var(--color-accent)] flex-shrink-0" />
       {#if chatStore.selectedModel}
-        <span class="truncate font-semibold text-xs">{chatStore.selectedModel.name}</span>
+        <span class="truncate font-semibold text-xs">{displayName(chatStore.selectedModel)}</span>
         {#if chatStore.selectedModel.contextLength}
           <span class="text-[0.6875rem] px-1 py-0.2 rounded bg-[rgba(var(--accent-rgb),0.12)] text-[var(--color-accent)] font-mono border border-[rgba(var(--accent-rgb),0.25)] flex-shrink-0">
             {formatCtx(chatStore.selectedModel.contextLength)}
@@ -108,8 +135,42 @@
           onkeydown={(e) => e.stopPropagation()}
           aria-label="Search models"
         />
-        <span class="model-search-count">{filteredFree.length + filteredPaid.length}</span>
+        <span class="model-search-count">{filteredLocal.length + filteredFree.length + filteredPaid.length}</span>
       </div>
+
+      {#if filteredLocal.length > 0}
+        <div class="group-label local-label">
+          <span>⟨ Local Models ⟩</span>
+          <span class="text-[0.6875rem] font-bold text-[var(--color-accent)]">ON THIS MAC</span>
+        </div>
+        {#each filteredLocal as model (model.id)}
+          {@const isSelected = chatStore.selectedModel?.id === model.id}
+          <button
+            class="model-item {isSelected ? 'selected' : ''}"
+            onclick={() => selectLocal(model)}
+          >
+            <div class="flex items-center gap-2 min-w-0 truncate">
+              {#if isSelected}
+                <IconCheck size={12} class="text-[var(--color-accent)] flex-shrink-0" />
+              {:else}
+                <span class="w-3"></span>
+              {/if}
+              <span class="truncate">{displayName(model)}</span>
+              <span class="text-[0.625rem] text-[var(--color-muted)] flex-shrink-0 opacity-70">{model.providerName}</span>
+            </div>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              {#if model.size}
+                <span class="text-[0.6875rem] text-[var(--color-muted)] font-mono">{model.size}</span>
+              {/if}
+              {#if model.running}
+                <span class="tool-badge tools">running</span>
+              {:else}
+                <span class="tool-badge warn">tap to serve</span>
+              {/if}
+            </div>
+          </button>
+        {/each}
+      {/if}
 
       {#if filteredFree.length > 0}
         <div class="group-label free-label {freeBarGone ? 'gone' : ''}" bind:this={freeLabelEl}>
@@ -129,7 +190,7 @@
               {:else}
                 <span class="w-3"></span>
               {/if}
-              <span class="truncate">{model.name}</span>
+              <span class="truncate">{displayName(model)}</span>
             </div>
             <div class="flex items-center gap-1.5 flex-shrink-0">
               {#if model.contextLength}
@@ -160,7 +221,7 @@
               {:else}
                 <span class="w-3"></span>
               {/if}
-              <span class="truncate">{model.name}</span>
+              <span class="truncate">{displayName(model)}</span>
             </div>
             <div class="flex items-center gap-1.5 flex-shrink-0">
               {#if model.contextLength}
@@ -176,7 +237,7 @@
         {/each}
       {/if}
 
-      {#if filteredFree.length === 0 && filteredPaid.length === 0}
+      {#if filteredLocal.length === 0 && filteredFree.length === 0 && filteredPaid.length === 0}
         <div class="model-empty">No models match “{query}”.</div>
       {/if}
     </div>

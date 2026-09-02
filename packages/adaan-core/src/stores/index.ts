@@ -21,4 +21,5 @@ export {
   type TerminalMode,
   migrateBlob,
   migrateLegacy,
+  modelAliasKey,
 } from "./settings.js";

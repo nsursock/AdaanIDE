@@ -53,11 +53,26 @@ export { detectOutcome, isCorrectionMessage, isUpgrade, OUTCOME_WEIGHTS, buildRe
 export {
   initProvider,
   updateProviderKey,
+  updateProviderBaseUrl,
+  setLocalEndpoint,
+  ensureLocalModel,
   getProvider,
   getEngine,
+  fetchOpenRouterCatalog,
   getWorkspace,
   registerWorkspace,
   getSession,
   createSSEStream,
   createCallbackSSEStream,
 } from "./routes.js";
+export type { LocalModelRef } from "./routes.js";
+export {
+  discoverProviders,
+  discoverProvider,
+  startServer,
+  stopServer,
+  getServerStatus,
+  isServerRunning,
+  ensureServing,
+} from "./local/index.js";
+export type { DiscoveredProvider, DiscoveredModel } from "./local/index.js";

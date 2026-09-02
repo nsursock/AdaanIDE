@@ -6,7 +6,7 @@ let initialized = false;
 
 function ensureInit() {
   if (!initialized) {
-    initProvider(env.OPENROUTER_API_KEY || "");
+    initProvider(env.OPENROUTER_API_KEY || "", env.OPENROUTER_BASE_URL || undefined);
     initialized = true;
   }
 }

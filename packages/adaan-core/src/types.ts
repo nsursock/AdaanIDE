@@ -72,6 +72,9 @@ export interface WorkspaceInfo {
 export interface ModelInfo {
   id: string;
   name: string;
+  /** User-defined display name (Settings → Models). Shown in the model
+   *  selector instead of `name` when set. Currently only local models. */
+  alias?: string;
   contextLength: number;
   pricing: {
     prompt: string;
@@ -81,9 +84,34 @@ export interface ModelInfo {
   free: boolean;
 }
 
+/** A model served by a local OpenAI-compatible runtime (Ollama, Rapid-MLX,
+ *  LM Studio). Extends ModelInfo with the metadata needed to launch and
+ *  connect to the local server. */
+export interface LocalModelInfo extends ModelInfo {
+  /** Provider id: "ollama" | "rapid-mlx" | "lmstudio" */
+  providerId: string;
+  /** Human-readable provider name for display */
+  providerName: string;
+  /** Full endpoint URL, e.g. "http://localhost:8000/v1" */
+  endpoint: string;
+  /** Whether this specific model is currently being served (not just
+   *  whether the provider's server is running — only true for the model
+   *  the server actually reports via /v1/models). */
+  running: boolean;
+  /** Model size string from the provider CLI (e.g. "5.6 GiB") */
+  size?: string;
+  /** Full HF repo name as reported by the server's /v1/models endpoint
+   *  (e.g. "mlx-community/Qwen3.5-4B-MLX-4bit"). May differ from `id`
+   *  (the alias). Used to match the served model. */
+  hfRepo?: string;
+}
+
 export interface ModelGroups {
   free: ModelInfo[];
   paid: ModelInfo[];
+  /** Locally-installed models from detected runtimes. Empty when no local
+   *  providers are installed or the discovery hasn't run yet. */
+  local: LocalModelInfo[];
 }
 
 // --- Agent Events ------------------------------------------------------------

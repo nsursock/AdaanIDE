@@ -8,6 +8,7 @@ export type {
   SymbolEntry,
   WorkspaceInfo,
   ModelInfo,
+  LocalModelInfo,
   ModelGroups,
   AgentEvent,
   AgentEventType,
@@ -55,4 +56,5 @@ export {
   type TerminalMode,
   migrateBlob,
   migrateLegacy,
+  modelAliasKey,
 } from "./stores/index.js";

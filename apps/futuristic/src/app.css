@@ -1684,6 +1684,11 @@ html, body {
 .model-picker-menu .group-label.paid-label {
   transition: opacity 0.28s cubic-bezier(0.4, 0, 0.2, 1);
 }
+.model-picker-menu .group-label.local-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
 .model-picker-menu .model-item {
   width: 100%;
   display: flex;

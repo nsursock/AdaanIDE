@@ -85,6 +85,11 @@ export class OpenRouterProvider implements LLMProvider {
   private retryDelayMs: number;
   private lastUsed: Map<string, number> = new Map(); // model -> timestamp (for LRU)
   private liveFreeModelsCache: { ids: string[]; fetchedAt: number } | null = null;
+  /** When set, requests for models in this set go to the local endpoint
+   *  instead of OpenRouter. This allows seamless switching between local
+   *  and cloud models without changing the provider's baseUrl. */
+  private localEndpoint: string | null = null;
+  private localModels: Set<string> = new Set();
 
   constructor(opts: OpenRouterProviderOptions) {
     this.apiKey = opts.apiKey;
@@ -94,6 +99,40 @@ export class OpenRouterProvider implements LLMProvider {
     this.siteName = opts.siteName ?? "AdaanIDE";
     this.idleTimeoutMs = opts.idleTimeoutMs ?? STREAM_IDLE_TIMEOUT_MS;
     this.retryDelayMs = opts.retryDelayMs ?? SAME_MODEL_RETRY_DELAY_MS;
+  }
+
+  /** Configure a local endpoint for local models. When a chat request
+   *  uses a model in `models`, it's routed to `endpoint` instead of
+   *  OpenRouter. Pass null to clear. */
+  setLocalEndpoint(endpoint: string | null, models: string[] = []) {
+    this.localEndpoint = endpoint;
+    this.localModels = new Set(models);
+  }
+
+  /** Check if a model should be routed to the local endpoint. */
+  private isLocalModel(model: string): boolean {
+    if (!this.localEndpoint) return false;
+    // Exact match
+    if (this.localModels.has(model)) return true;
+    // Also check if the model doesn't look like an OpenRouter model
+    // (OpenRouter models are "vendor/model" or "vendor/model:free")
+    // Local models from Rapid-MLX are "mlx-community/..." or aliases like "qwen3.5-4b-4bit"
+    // But we only route to local if we know the model is local (in the set)
+    return false;
+  }
+
+  /** Get the base URL for a given model — local endpoint for local models,
+   *  OpenRouter for everything else. */
+  private baseUrlForModel(model: string): string {
+    if (this.isLocalModel(model)) return this.localEndpoint!;
+    return this.baseUrl;
+  }
+
+  /** Get the API key for a given model — "not-needed" for local models,
+   *  the real key for OpenRouter. */
+  private apiKeyForModel(model: string): string {
+    if (this.isLocalModel(model)) return "not-needed";
+    return this.apiKey;
   }
 
   /**
@@ -343,10 +382,10 @@ export class OpenRouterProvider implements LLMProvider {
 
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/chat/completions`, {
+      response = await fetch(`${this.baseUrlForModel(options.model)}/chat/completions`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${this.apiKeyForModel(options.model)}`,
           "Content-Type": "application/json",
           "HTTP-Referer": this.siteUrl,
           "X-Title": this.siteName,
@@ -628,8 +667,13 @@ export class OpenRouterProvider implements LLMProvider {
     for (const model of data.data) {
       const id: string = model.id;
       const isFree = id.endsWith(":free") || (model.pricing?.prompt === "0" && model.pricing?.completion === "0");
-      const supportedParams: string[] = model.supported_parameters ?? [];
-      const toolsCapable = supportedParams.includes("tools") || supportedParams.includes("tool_choice");
+      // OpenRouter reliably reports `supported_parameters`; local OpenAI-compatible
+      // servers (Rapid-MLX, mlx-lm, Ollama, LM Studio) omit it. Default to
+      // tools-capable when the field is entirely absent so local models remain
+      // selectable in the picker (which disables non-tools-capable models).
+      const sp = model.supported_parameters;
+      const toolsCapable =
+        sp === undefined ? true : Array.isArray(sp) && (sp.includes("tools") || sp.includes("tool_choice"));
 
       const info: ModelInfo = {
         id,
@@ -654,7 +698,7 @@ export class OpenRouterProvider implements LLMProvider {
     free.sort((a, b) => (Number(b.toolsCapable) - Number(a.toolsCapable)) || a.name.localeCompare(b.name));
     paid.sort((a, b) => (Number(b.toolsCapable) - Number(a.toolsCapable)) || a.name.localeCompare(b.name));
 
-    return { free, paid };
+    return { free, paid, local: [] };
   }
 }
 

@@ -11,6 +11,7 @@ import {
   CHAT_MAX,
   TERMINAL_MIN,
   TERMINAL_MAX,
+  modelAliasKey,
 } from "../src/stores/settings.js";
 
 test("migrateBlob: empty / null input yields defaults", () => {
@@ -115,4 +116,34 @@ test("migrateLegacy: invalid legacy theme is dropped, bad widths clamped", () =>
   assert.equal("theme" in out, false);
   assert.equal(out.sidebarWidth, SIDEBAR_MIN);
   assert.equal(out.chatWidth, CHAT_MAX);
+});
+
+test("modelAliasKey: builds a stable provider/model key", () => {
+  assert.equal(modelAliasKey("ollama", "qwen3:14b"), "ollama/qwen3:14b");
+  assert.equal(modelAliasKey("rapid-mlx", "qwen3.5-4b-4bit"), "rapid-mlx/qwen3.5-4b-4bit");
+  assert.notEqual(modelAliasKey("ollama", "m"), modelAliasKey("lmstudio", "m"));
+});
+
+test("migrateBlob: modelAliases keeps non-empty string values only", () => {
+  const out = migrateBlob({
+    modelAliases: {
+      "ollama/qwen3:14b": "Qwen 14B",
+      "rapid-mlx/foo": "  padded  ",
+      "lmstudio/empty": "",
+      "lmstudio/blank": "   ",
+      "ollama/bad": 42,
+    },
+  });
+  assert.equal(out.modelAliases["ollama/qwen3:14b"], "Qwen 14B");
+  assert.equal(out.modelAliases["rapid-mlx/foo"], "padded");
+  assert.equal("lmstudio/empty" in out.modelAliases, false);
+  assert.equal("lmstudio/blank" in out.modelAliases, false);
+  assert.equal("ollama/bad" in out.modelAliases, false);
+});
+
+test("migrateBlob: modelAliases falls back to empty map on bad input", () => {
+  assert.deepEqual(migrateBlob({ modelAliases: null }).modelAliases, {});
+  assert.deepEqual(migrateBlob({ modelAliases: "nope" }).modelAliases, {});
+  assert.deepEqual(migrateBlob({ modelAliases: ["a", "b"] }).modelAliases, {});
+  assert.deepEqual(migrateBlob({}).modelAliases, {});
 });

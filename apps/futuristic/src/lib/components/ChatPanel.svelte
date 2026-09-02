@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { chatStore, workspaceStore, settingsStore, type ModelInfo, type ChatMessageEntry } from "@adaan/core";
+  import { chatStore, workspaceStore, settingsStore, modelAliasKey, type ModelInfo, type LocalModelInfo, type ChatMessageEntry } from "@adaan/core";
   import { onMount } from "svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ModelPicker from "./ModelPicker.svelte";
@@ -23,7 +23,9 @@
   let { workspaceRoot, onFileChanged = () => {} } = $props();
 
   let input = $state("");
-  let models = $state<{ free: ModelInfo[]; paid: ModelInfo[] } | null>(null);
+  let models = $state<{ free: ModelInfo[]; paid: ModelInfo[]; local: LocalModelInfo[] } | null>(null);
+  let servingLocal = $state(false);
+  let serveError = $state<string | null>(null);
   let eventSource: EventSource | null = null;
   let pendingApprovals = $state<Array<{ sessionId: string; toolCallId: string; toolName: string; args: any }>>([]);
   let messagesContainer: HTMLDivElement;
@@ -57,6 +59,18 @@
       const res = await fetch("/api/models");
       if (res.ok) {
         models = await res.json();
+        // Ensure local array exists even if the server didn't send one
+        if (models && !models.local) models.local = [];
+        // Apply user-defined display aliases (Settings → Models). Aliases
+        // live in client settings, so they're merged in here rather than
+        // served by the API.
+        if (models) {
+          const aliases = settingsStore.settings.modelAliases;
+          for (const m of models.local) {
+            const alias = aliases[modelAliasKey(m.providerId, m.id)];
+            if (alias) m.alias = alias;
+          }
+        }
         // Restore the user's last-selected model if it's still available;
         // otherwise fall back to the first free tools-capable model.
         if (models && !chatStore.restoreModel(models)) {
@@ -69,6 +83,72 @@
     }
   }
 
+  /** Build the local-server ref sent with every chat request when a local
+   *  model is selected, so the backend can ensure the server is up before
+   *  the turn runs. Returns undefined for cloud models. */
+  function localRef(model: ModelInfo | null): { providerId: string; modelId: string; hfRepo?: string; singleModel: boolean } | undefined {
+    const lm = model as LocalModelInfo | null;
+    if (!lm || typeof lm.providerId !== "string") return undefined;
+    return {
+      providerId: lm.providerId,
+      modelId: lm.id,
+      hfRepo: lm.hfRepo,
+      singleModel: settingsStore.settings.singleLocalModel,
+    };
+  }
+
+  /**
+   * Select a non-local (OpenRouter) model. The provider routes based on
+   * the model name — OpenRouter models go to openrouter.ai, local models
+   * go to the local endpoint. No endpoint reset needed.
+   */
+  function selectModel(model: ModelInfo) {
+    chatStore.setModel(model);
+  }
+
+  /**
+   * Select a local model: start the provider's server (if not already
+   * running), configure the provider to route this model to the local
+   * endpoint, then set the model as active. Shows a serving indicator
+   * while the server starts up. Sending is blocked until this completes,
+   * and the session endpoint re-verifies the server is up before every
+   * turn — so a message can never reach a dead endpoint.
+   */
+  async function selectLocalModel(model: LocalModelInfo) {
+    serveError = null;
+    servingLocal = true;
+    try {
+      const res = await fetch("/api/local/serve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          providerId: model.providerId,
+          modelId: model.id,
+          hfRepo: model.hfRepo,
+          singleModel: settingsStore.settings.singleLocalModel,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        serveError = data.error ?? "Failed to start local server";
+        servingLocal = false;
+        return;
+      }
+      // Keep the discovery id on the model — the session endpoint resolves
+      // the server-side wire name (which may differ, e.g. an HF repo) via
+      // the localModel ref sent with every request. Persisting the stable
+      // discovery id also makes the selection survive reloads.
+      chatStore.setModel(model);
+      // Refresh the model list so running badges reflect the new state
+      // (the old server was stopped, the new one is running).
+      await loadModels();
+    } catch (e) {
+      serveError = e instanceof Error ? e.message : "Network error";
+    } finally {
+      servingLocal = false;
+    }
+  }
+
   function handlePromptChip(text: string) {
     input = text;
     send();
@@ -77,6 +157,7 @@
   async function send() {
     if (!input.trim()) return;
     if (chatStore.streaming) return;
+    if (servingLocal) return; // never send before the local server is up
     const message = input.trim();
     input = "";
     await sendMessage(message);
@@ -88,6 +169,7 @@
    */
   async function sendInterrupt() {
     if (!input.trim()) return;
+    if (servingLocal) return; // never send before the local server is up
     const message = input.trim();
     input = "";
 
@@ -108,12 +190,17 @@
    */
   async function sendQueue() {
     if (!input.trim() || !chatStore.streaming) return;
+    if (servingLocal) return; // never send before the local server is up
     const message = input.trim();
     input = "";
 
-    const model = chatStore.selectedModel?.id || undefined;
-    const contextLength = chatStore.selectedModel?.contextLength || 4096;
-    const effectiveModel = settingsStore.settings.routingMode === "auto" ? "auto" : model;
+    const selected = chatStore.selectedModel;
+    const local = localRef(selected);
+    const model = selected?.id || undefined;
+    const contextLength = selected?.contextLength || 4096;
+    // An explicit local pick always wins over auto-routing (the router only
+    // knows cloud models). Otherwise honor the routing mode.
+    const effectiveModel = settingsStore.settings.routingMode === "auto" && !local ? "auto" : model;
 
     await fetch("/api/sessions", {
       method: "POST",
@@ -128,6 +215,7 @@
         routingThreshold: settingsStore.settings.routingThreshold,
         routingTiers: settingsStore.settings.routingTiers,
         explorationPaidEnabled: settingsStore.settings.explorationPaidEnabled,
+        localModel: local,
         interrupt: false,
       }),
     });
@@ -156,32 +244,52 @@
     chatStore.cancelPendingToolCalls();
     chatStore.addUserMessage(message);
 
-    const model = chatStore.selectedModel?.id || undefined;
-    const contextLength = chatStore.selectedModel?.contextLength || 4096;
+    const selected = chatStore.selectedModel;
+    const local = localRef(selected);
+    const model = selected?.id || undefined;
+    const contextLength = selected?.contextLength || 4096;
 
     // Phase 3: when routing mode is "auto", send "auto" as the model so the
-    // engine's router picks the cheapest model likely to succeed.
-    const effectiveModel = settingsStore.settings.routingMode === "auto" ? "auto" : model;
+    // engine's router picks the cheapest model likely to succeed. An
+    // explicit local-model pick always wins — the router only knows about
+    // cloud models and would silently drop the local selection.
+    const effectiveModel = settingsStore.settings.routingMode === "auto" && !local ? "auto" : model;
 
-    const res = await fetch("/api/sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceRoot,
-        message,
-        model: effectiveModel,
-        contextLength,
-        sessionId: chatStore.sessionId,
-        routingMode: settingsStore.settings.routingMode,
-        routingThreshold: settingsStore.settings.routingThreshold,
-        routingTiers: settingsStore.settings.routingTiers,
-        explorationPaidEnabled: settingsStore.settings.explorationPaidEnabled,
-        interrupt: true,
-      }),
-    });
+    // If a local model is selected and we don't know it's running, show the
+    // serving indicator while the backend ensures the server is up. The
+    // session endpoint blocks until the server is ready, so no request can
+    // go out before that.
+    if (local && !(selected as LocalModelInfo).running) servingLocal = true;
+    let res: Response;
+    try {
+      res = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceRoot,
+          message,
+          model: effectiveModel,
+          contextLength,
+          sessionId: chatStore.sessionId,
+          routingMode: settingsStore.settings.routingMode,
+          routingThreshold: settingsStore.settings.routingThreshold,
+          routingTiers: settingsStore.settings.routingTiers,
+          explorationPaidEnabled: settingsStore.settings.explorationPaidEnabled,
+          localModel: local,
+          interrupt: true,
+        }),
+      });
+    } finally {
+      servingLocal = false;
+    }
 
     if (!res.ok) {
-      chatStore.startAssistantMessage();
+      const data = await res.json().catch(() => ({}));
+      const id = chatStore.startAssistantMessage();
+      chatStore.setAssistantError(
+        id,
+        data.error ?? "Failed to start the session. If a local model is selected, its server may have failed to start.",
+      );
       chatStore.finishStreaming();
       return;
     }
@@ -370,7 +478,7 @@
     if (!models || models.paid.length === 0) return;
 
     const paidModel = models.paid.find((m) => m.toolsCapable) ?? models.paid[0];
-    chatStore.setModel(paidModel);
+    await selectModel(paidModel);
 
     // Find the user message that started the failed turn so we can retry it.
     const idx = chatStore.messages.findIndex((m) => m.id === msg.id);
@@ -476,7 +584,18 @@
 
   <!-- Model Selector -->
   {#if models}
-    <ModelPicker {models} />
+    <ModelPicker {models} onSelectLocal={selectLocalModel} onSelect={selectModel} />
+  {/if}
+  {#if servingLocal}
+    <div class="px-3 py-1.5 text-[0.6875rem] text-[var(--color-accent)] flex items-center gap-1.5 border-b border-[var(--color-border)] bg-[rgba(var(--accent-rgb),0.06)]">
+      <span class="inline-block w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] animate-pulse"></span>
+      Starting local server…
+    </div>
+  {/if}
+  {#if serveError}
+    <div class="px-3 py-1.5 text-[0.6875rem] text-[var(--color-error)] border-b border-[var(--color-border)]">
+      {serveError}
+    </div>
   {/if}
 
   <!-- Messages List -->
@@ -569,7 +688,7 @@
             {/if}
           </div>
         {:else}
-          <button class="chat-send" onclick={send} disabled={!input.trim()} title="Send command" aria-label="Send">
+          <button class="chat-send" onclick={send} disabled={!input.trim() || servingLocal} title={servingLocal ? "Waiting for the local server to start" : "Send command"} aria-label="Send">
             <IconSend size={15} />
           </button>
         {/if}

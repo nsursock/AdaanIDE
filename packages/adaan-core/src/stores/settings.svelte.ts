@@ -6,6 +6,7 @@ import {
   DEFAULT_SETTINGS,
   migrateBlob,
   migrateLegacy,
+  modelAliasKey,
   type Settings,
 } from "./settings.js";
 
@@ -107,6 +108,10 @@ class SettingsStore {
     this.update({ openrouterApiKey: key });
   }
 
+  setProviderBaseUrl(url: string | null) {
+    this.update({ providerBaseUrl: url });
+  }
+
   setRoutingMode(mode: "auto" | "manual") {
     this.update({ routingMode: mode });
   }
@@ -125,6 +130,21 @@ class SettingsStore {
 
   setExplorationPaidEnabled(b: boolean) {
     this.update({ explorationPaidEnabled: b });
+  }
+
+  setSingleLocalModel(b: boolean) {
+    this.update({ singleLocalModel: b });
+  }
+
+  /** Set (or clear, when `alias` is empty) the display alias for a
+   *  discovered local model. Aliases are shown in the model selector. */
+  setModelAlias(providerId: string, modelId: string, alias: string) {
+    const next = { ...this.settings.modelAliases };
+    const trimmed = alias.trim();
+    const key = modelAliasKey(providerId, modelId);
+    if (trimmed) next[key] = trimmed;
+    else delete next[key];
+    this.update({ modelAliases: next });
   }
 
   reset() {

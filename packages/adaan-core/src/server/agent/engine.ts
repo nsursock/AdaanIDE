@@ -102,9 +102,16 @@ export class AgentEngine {
     session: AgentSession,
     workspace: import("../workspace.js").Workspace,
     userMessage: string,
-    model: string,
+    model: string | undefined,
     contextLength: number,
   ): AsyncIterable<AgentEvent> {
+    // A turn may start without an explicit model (manual routing, nothing
+    // selected). Resolve that to the provider's default pick up front so the
+    // rest of the loop — telemetry, status lines, provider requests — always
+    // works with a concrete model id.
+    if (!model) {
+      model = ((this.provider as { pickModel?: () => string }).pickModel?.() ?? "") || "auto";
+    }
     const emit = (type: AgentEvent["type"], data?: unknown): AgentEvent => {
       const event: AgentEvent = {
         type,
@@ -186,11 +193,11 @@ export class AgentEngine {
         } else {
           // Router returned null (manual mode or no models) — fall back to
           // the provider's default model selection.
-          model = (this.provider as any).pickModel?.() ?? model;
+          model = (this.provider as { pickModel?: () => string }).pickModel?.() ?? model;
         }
       } catch {
         // Routing is best-effort — don't fail the task if it errors.
-        model = (this.provider as any).pickModel?.() ?? model;
+        model = (this.provider as { pickModel?: () => string }).pickModel?.() ?? model ?? "auto";
       }
     }
     const finalizeTask = (): TaskSummaryData => {
@@ -262,15 +269,20 @@ export class AgentEngine {
         // A3: inject a workspace snapshot on the first request of the session
         // (when no assistant message has been sent yet). This kills the common
         // "exploration" request where the model calls list_files just to orient.
+        // The snapshot is merged INTO the system prompt (not inserted as a
+        // separate system message) because some local model chat templates
+        // (e.g. Qwen3.5 on Rapid-MLX) reject multiple system messages.
         const hasAssistantMsg = session.messages.some((m) => m.role === "assistant");
         if (!hasAssistantMsg && !task.snapshotInjected) {
           try {
             const snapshot = await buildWorkspaceSnapshot(workspace);
             if (snapshot) {
-              providerMessages.splice(1, 0, {
-                role: "system",
-                content: `Workspace snapshot (do not call list_files if this already answers your question):\n${snapshot}`,
-              });
+              providerMessages[0] = {
+                ...providerMessages[0],
+                content:
+                  providerMessages[0].content +
+                  `\n\nWorkspace snapshot (do not call list_files if this already answers your question):\n${snapshot}`,
+              };
               task.snapshotInjected = true;
             }
           } catch {

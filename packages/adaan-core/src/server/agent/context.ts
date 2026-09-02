@@ -252,15 +252,26 @@ export function pruneContext(
     }
   }
 
-  const elisionNote: ProviderMessage = {
-    role: "system",
-    content: `[${droppedIndices.size} earlier turn(s) elided to fit context window: ${droppedTurns
-      .map((t) => `"${t}…"`)
-      .join(", ")}. Re-read files if you need details.]`,
-  };
+  const elisionContent = `[${droppedIndices.size} earlier turn(s) elided to fit context window: ${droppedTurns
+    .map((t) => `"${t}…"`)
+    .join(", ")}. Re-read files if you need details.]`;
+
+  // Merge the elision note into the last system message instead of
+  // inserting a separate system message. Some local model chat templates
+  // (e.g. Qwen3.5 on Rapid-MLX) reject multiple system messages.
+  const finalMessages: ProviderMessage[] = [...systemMsgs];
+  if (finalMessages.length > 0) {
+    finalMessages[finalMessages.length - 1] = {
+      ...finalMessages[finalMessages.length - 1],
+      content: finalMessages[finalMessages.length - 1].content + "\n\n" + elisionContent,
+    };
+  } else {
+    // No system message exists — create one at the start.
+    finalMessages.push({ role: "system", content: elisionContent });
+  }
 
   return {
-    messages: [...systemMsgs, elisionNote, ...surviving],
+    messages: [...finalMessages, ...surviving],
     prunedCount,
     compactedTokensSaved: compactSaved,
   };
