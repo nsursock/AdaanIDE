@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { AgentSession } from "../src/server/agent/session.js";
+import { argsHashKey, isApplyPatchFormatError } from "../src/server/agent/engine.js";
 import type { ChatMessage, ToolCall } from "../src/types.js";
 
 /**
@@ -167,5 +168,209 @@ describe("Engine fixes — supersession (interrupt) behavior", () => {
     assert.equal(session.abortController.signal.aborted, true);
     session.resume();  // new turn
     assert.equal(session.abortController.signal.aborted, false, "new controller should not be aborted");
+  });
+});
+
+/**
+ * Tests for the B1 repeat-failure guard hash normalization (Fix 3).
+ *
+ * The guard blocks identical failed tool calls. Without normalization, a
+ * model could evade it by adding a trailing newline or spaces to the patch
+ * — producing a different JSON.stringify hash for an otherwise identical
+ * call. argsHashKey trims trailing whitespace on text-blob args (patch,
+ * content) so cosmetic changes don't evade the guard.
+ */
+describe("Engine fixes — B1 argsHashKey normalization", () => {
+  it("produces the same hash for apply_patch patches differing only in trailing whitespace", () => {
+    const a = argsHashKey("apply_patch", {
+      path: "ppo.py",
+      patch: "SEARCH\ndef foo():\n    pass\nREPLACE\ndef bar():\n    pass",
+      expectedHash: "abc",
+    });
+    const b = argsHashKey("apply_patch", {
+      path: "ppo.py",
+      patch: "SEARCH\ndef foo():\n    pass\nREPLACE\ndef bar():\n    pass\n\n\n",
+      expectedHash: "abc",
+    });
+    assert.equal(a, b, "trailing whitespace on patch must not change the hash");
+  });
+
+  it("produces the same hash for write_file content differing only in trailing whitespace", () => {
+    const a = argsHashKey("write_file", {
+      path: "ppo.py",
+      content: "print('hello')\n",
+      expectedHash: "abc",
+    });
+    const b = argsHashKey("write_file", {
+      path: "ppo.py",
+      content: "print('hello')\n   \n\n",
+      expectedHash: "abc",
+    });
+    assert.equal(a, b, "trailing whitespace on content must not change the hash");
+  });
+
+  it("produces different hashes when the patch content genuinely differs", () => {
+    const a = argsHashKey("apply_patch", {
+      path: "ppo.py",
+      patch: "SEARCH\nold\nREPLACE\nnew1",
+      expectedHash: "abc",
+    });
+    const b = argsHashKey("apply_patch", {
+      path: "ppo.py",
+      patch: "SEARCH\nold\nREPLACE\nnew2",
+      expectedHash: "abc",
+    });
+    assert.notEqual(a, b, "genuinely different patches must hash differently");
+  });
+
+  it("preserves leading/internal whitespace (only trailing is trimmed)", () => {
+    const a = argsHashKey("apply_patch", {
+      path: "f.py",
+      patch: "SEARCH\n    indented\nREPLACE\n    still",
+      expectedHash: "h",
+    });
+    const b = argsHashKey("apply_patch", {
+      path: "f.py",
+      patch: "SEARCH\n    indented\nREPLACE\n    still\n",
+      expectedHash: "h",
+    });
+    assert.equal(a, b, "leading indentation preserved, trailing newline ignored");
+  });
+
+  it("uses tool name in the hash so different tools don't collide", () => {
+    const a = argsHashKey("apply_patch", { path: "f.py", patch: "x", expectedHash: "h" });
+    const b = argsHashKey("write_file", { path: "f.py", content: "x", expectedHash: "h" });
+    assert.notEqual(a, b, "different tool names must produce different hashes");
+  });
+});
+
+/**
+ * Tests for the D10 apply_patch format-error detection (Fix 2).
+ *
+ * When apply_patch fails with a format problem (the model structured the
+ * patch wrong), the engine appends a directive hint showing the correct
+ * SEARCH/REPLACE format and the write_file fallback. isApplyPatchFormatError
+ * distinguishes format errors from content/hash errors so the hint only
+ * fires when it's actually useful.
+ */
+describe("Engine fixes — apply_patch format-error detection", () => {
+  it("detects 'no REPLACE section' errors", () => {
+    assert.ok(isApplyPatchFormatError(
+      'SEARCH block has no REPLACE section — refusing to silently delete lines.',
+    ));
+  });
+
+  it("detects 'no valid SEARCH/REPLACE blocks' errors", () => {
+    assert.ok(isApplyPatchFormatError(
+      "No valid SEARCH/REPLACE blocks were found in the patch.",
+    ));
+  });
+
+  it("detects 'SEARCH block not found' errors", () => {
+    assert.ok(isApplyPatchFormatError(
+      "SEARCH block not found:\ndef foo()...",
+    ));
+  });
+
+  it("does NOT flag hash mismatch errors (those need a re-read, not a format hint)", () => {
+    assert.equal(
+      isApplyPatchFormatError("Hash mismatch: file has been modified since read"),
+      false,
+    );
+  });
+
+  it("does NOT flag generic tool execution errors", () => {
+    assert.equal(
+      isApplyPatchFormatError("File not found for patching: ppo.py"),
+      false,
+    );
+  });
+
+  it("does NOT flag the 'patch produced no changes' error (that's a content issue)", () => {
+    assert.equal(
+      isApplyPatchFormatError("Patch produced no changes — the file content is identical."),
+      false,
+    );
+  });
+});
+
+/**
+ * D19: Tool call argument normalization.
+ *
+ * Free models (e.g. cohere/north-mini-code) sometimes emit tool calls with
+ * empty or malformed arguments. If stored as-is, the next provider request
+ * sends the malformed arguments back, causing a 400: "tool arguments must
+ * be a stringified JSON object". The engine normalizes empty/malformed
+ * arguments to "{}" both at storage time and in buildProviderMessages.
+ */
+describe("D19: tool call argument normalization", () => {
+  // Replica of the normalization logic in tool_call.complete handler.
+  function normalizeArgs(raw: string): string {
+    if (!raw || !raw.trim()) return "{}";
+    try {
+      JSON.parse(raw);
+      return raw;
+    } catch {
+      return "{}";
+    }
+  }
+
+  it("normalizes empty string to {}", () => {
+    assert.equal(normalizeArgs(""), "{}");
+  });
+
+  it("normalizes whitespace-only string to {}", () => {
+    assert.equal(normalizeArgs("   "), "{}");
+  });
+
+  it("preserves valid JSON object", () => {
+    assert.equal(normalizeArgs('{"path":"foo.py"}'), '{"path":"foo.py"}');
+  });
+
+  it("preserves valid JSON with nested structure", () => {
+    const args = '{"path":"foo.py","content":"def foo():\\n  pass\\n"}';
+    assert.equal(normalizeArgs(args), args);
+  });
+
+  it("normalizes malformed JSON to {}", () => {
+    assert.equal(normalizeArgs("{path: foo.py}"), "{}");
+  });
+
+  it("normalizes truncated JSON to {}", () => {
+    assert.equal(normalizeArgs('{"path":"foo'), "{}");
+  });
+
+  it("preserves valid empty JSON object", () => {
+    assert.equal(normalizeArgs("{}"), "{}");
+  });
+
+  it("buildProviderMessages safety net: normalizes tool calls with empty args", () => {
+    // Replica of the buildProviderMessages safety net logic.
+    function normalizeToolCalls(toolCalls: ToolCall[]): ToolCall[] {
+      return toolCalls.map((tc) => {
+        const args = tc.function.arguments;
+        if (!args || !args.trim()) {
+          return { ...tc, function: { ...tc.function, arguments: "{}" } };
+        }
+        try {
+          JSON.parse(args);
+          return tc;
+        } catch {
+          return { ...tc, function: { ...tc.function, arguments: "{}" } };
+        }
+      });
+    }
+
+    const input: ToolCall[] = [
+      { id: "1", type: "function", function: { name: "create_file", arguments: "" } },
+      { id: "2", type: "function", function: { name: "write_file", arguments: '{"path":"a.py"}' } },
+      { id: "3", type: "function", function: { name: "apply_patch", arguments: "{bad json" } },
+      { id: "4", type: "function", function: { name: "read_file", arguments: "  " } },
+    ];
+    const output = normalizeToolCalls(input);
+    assert.equal(output[0].function.arguments, "{}");
+    assert.equal(output[1].function.arguments, '{"path":"a.py"}');
+    assert.equal(output[2].function.arguments, "{}");
+    assert.equal(output[3].function.arguments, "{}");
   });
 });

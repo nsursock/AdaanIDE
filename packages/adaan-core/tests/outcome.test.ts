@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   OUTCOME_WEIGHTS,
+  OUTCOME_RANK,
   isUpgrade,
   isCorrectionMessage,
   isTestPass,
@@ -161,6 +162,39 @@ describe("outcome", () => {
 
     it("accepted takes priority over verified", () => {
       assert.equal(detectOutcome([{ output: { exitCode: 0 } }], "accepted"), "accepted");
+    });
+  });
+
+  describe("OUTCOME_RANK (D12 monotonicity)", () => {
+    it("verified has the highest rank", () => {
+      assert.equal(OUTCOME_RANK.verified, 5);
+    });
+
+    it("rejected has the lowest rank", () => {
+      assert.equal(OUTCOME_RANK.rejected, 0);
+    });
+
+    it("silent ranks above corrected", () => {
+      assert.ok(OUTCOME_RANK.silent > OUTCOME_RANK.corrected);
+    });
+
+    it("can be used to guard monotonic relabeling (D12 pattern)", () => {
+      // D12 pattern: relabel to "rejected" on error status, but NEVER
+      // downgrade verified/accepted (monotonicity). This is the exact
+      // check the engine's finalizeTask() does.
+      const shouldRelabel = (current: string): boolean =>
+        current !== "verified" && current !== "accepted";
+
+      // "silent" (default) → should relabel to rejected
+      assert.equal(shouldRelabel("silent"), true);
+      // "verified" → should NOT relabel (monotonicity: never downgrade verified)
+      assert.equal(shouldRelabel("verified"), false);
+      // "accepted" → should NOT relabel
+      assert.equal(shouldRelabel("accepted"), false);
+      // "rejected" → already rejected, relabel is a no-op but allowed
+      assert.equal(shouldRelabel("rejected"), true);
+      // "corrected" → should relabel (corrected is weak positive, error is stronger negative)
+      assert.equal(shouldRelabel("corrected"), true);
     });
   });
 });

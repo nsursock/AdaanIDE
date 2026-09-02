@@ -7,7 +7,7 @@ import type { ThemeId } from "../types.js";
 import { DEFAULT_THEME, THEME_IDS } from "../themes.js";
 
 /** Bump when the persisted shape changes; `migrateBlob` always rewrites to this. */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /** Single localStorage key holding the whole settings blob as JSON. */
 export const STORAGE_KEY = "adaan.settings.v1";
@@ -80,6 +80,11 @@ export interface Settings {
    *  `modelAliasKey(providerId, modelId)`. Shown in the model selector
    *  instead of the raw model name. */
   modelAliases: Record<string, string>;
+  /** Phase C: single-shot pipeline mode for weak (local) models.
+   *  "auto" = use single-shot for local regime only (default),
+   *  "always" = use for all tasks,
+   *  "never" = always use the normal ReAct loop. */
+  singleShotMode: "auto" | "always" | "never";
 }
 
 /** Build the stable key used in `modelAliases` for a discovered local model. */
@@ -107,6 +112,7 @@ export const DEFAULT_SETTINGS: Settings = {
   quotaDailyLimit: 1000,
   singleLocalModel: true,
   modelAliases: {},
+  singleShotMode: "auto",
 };
 
 function clamp(n: number, min: number, max: number): number {
@@ -208,6 +214,10 @@ export function migrateBlob(raw: unknown): Settings {
     singleLocalModel:
       typeof obj.singleLocalModel === "boolean" ? obj.singleLocalModel : DEFAULT_SETTINGS.singleLocalModel,
     modelAliases: safeAliases(obj.modelAliases),
+    singleShotMode:
+      obj.singleShotMode === "auto" || obj.singleShotMode === "always" || obj.singleShotMode === "never"
+        ? obj.singleShotMode
+        : DEFAULT_SETTINGS.singleShotMode,
   };
 }
 

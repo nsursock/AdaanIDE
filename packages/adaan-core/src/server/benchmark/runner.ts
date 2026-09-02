@@ -16,6 +16,9 @@ const FREE_REQUEST_BUDGET = 50; // refuse to run if < this many free requests re
 export interface BenchmarkRunOptions {
   models?: string[];
   tasks?: string[];
+  /** Phase B: optional tool filter — when set, only these tool schemas are
+   *  exposed to the model for this run. Used for edit-format experiments. */
+  toolFilter?: string[];
   provider: AgentEngine extends never ? never : import("../agent/provider.js").LLMProvider;
   engine: AgentEngine;
   registry: import("../agent/tools/registry.js").ToolRegistry;
@@ -103,6 +106,9 @@ export class BenchmarkRunner {
 
       const engine = opts.engine;
       engine.maxIterations = task.maxIterations;
+      // Phase B: apply tool filter if set (e.g. exclude apply_patch for
+      // the rewrite variant of the edit-format experiment).
+      (engine as any).toolFilter = opts.toolFilter;
 
       let requests = 0;
       let inputTokens = 0;

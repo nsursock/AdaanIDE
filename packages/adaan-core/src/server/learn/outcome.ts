@@ -31,7 +31,7 @@ export const OUTCOME_WEIGHTS: Record<Outcome, number> = {
  * Outcome rank for monotonicity — relabelOutcome never downgrades.
  * Higher rank = stronger outcome.
  */
-const OUTCOME_RANK: Record<Outcome, number> = {
+export const OUTCOME_RANK: Record<Outcome, number> = {
   verified: 5,
   accepted: 4,
   silent: 3,

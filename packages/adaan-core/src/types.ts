@@ -132,6 +132,7 @@ export type AgentEventType =
   | "model.free_exhausted"
   | "model.routed"
   | "model.escalated"
+  | "scope.warning"
   | "task.summary"
   | "status"
   | "progress"

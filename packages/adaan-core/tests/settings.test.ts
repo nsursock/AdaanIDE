@@ -87,6 +87,20 @@ test("migrateBlob: openrouterApiKey accepts string or null, else default", () =>
   assert.equal(migrateBlob({}).openrouterApiKey, null);
 });
 
+test("migrateBlob: singleShotMode accepts auto/always/never, else default", () => {
+  assert.equal(migrateBlob({ singleShotMode: "always" }).singleShotMode, "always");
+  assert.equal(migrateBlob({ singleShotMode: "never" }).singleShotMode, "never");
+  assert.equal(migrateBlob({ singleShotMode: "auto" }).singleShotMode, "auto");
+  assert.equal(migrateBlob({ singleShotMode: "invalid" }).singleShotMode, DEFAULT_SETTINGS.singleShotMode);
+  assert.equal(migrateBlob({}).singleShotMode, "auto");
+});
+
+test("migrateBlob: schema version is 5", () => {
+  assert.equal(SCHEMA_VERSION, 5);
+  assert.equal(migrateBlob({}).schemaVersion, 5);
+  assert.equal(migrateBlob({ schemaVersion: 3 }).schemaVersion, 5);
+});
+
 test("migrateLegacy: folds legacy per-feature keys into a partial", () => {
   const store: Record<string, string> = {
     "adaan-theme": "fiesta",

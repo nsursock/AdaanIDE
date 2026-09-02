@@ -69,6 +69,12 @@
             <span class="num {b.successRate > a.successRate ? "good" : b.successRate < a.successRate ? "bad" : "dim"}">{deltaPct(a.successRate, b.successRate)}</span>
           </div>
           <div class="ab-row">
+            <span class="dim">Weighted success</span>
+            <span class="num">{pct(a.weightedSuccessRate)}</span>
+            <span class="num">{pct(b.weightedSuccessRate)}</span>
+            <span class="num {b.weightedSuccessRate > a.weightedSuccessRate ? "good" : b.weightedSuccessRate < a.weightedSuccessRate ? "bad" : "dim"}">{deltaPct(a.weightedSuccessRate, b.weightedSuccessRate)}</span>
+          </div>
+          <div class="ab-row">
             <span>Reqs / task</span>
             <span class="num">{a.avgReqs.toFixed(1)}</span>
             <span class="num">{b.avgReqs.toFixed(1)}</span>
@@ -102,6 +108,7 @@
           </div>
           <div class="ab-row"><span>N</span><span class="num">{exp.arms[0].n}</span></div>
           <div class="ab-row"><span>Success rate</span><span class="num">{pct(exp.arms[0].successRate)}</span></div>
+          <div class="ab-row"><span class="dim">Weighted success</span><span class="num">{pct(exp.arms[0].weightedSuccessRate)}</span></div>
           <div class="ab-row"><span>Reqs / task</span><span class="num">{exp.arms[0].avgReqs.toFixed(1)}</span></div>
           <div class="ab-row"><span>Tokens / task</span><span class="num">{fmtTokens(exp.arms[0].avgTokens)}</span></div>
           <div class="ab-row"><span>Latency</span><span class="num">{fmtDuration(exp.arms[0].avgLatencyMs)}</span></div>

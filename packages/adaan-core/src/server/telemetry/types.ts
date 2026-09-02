@@ -122,6 +122,8 @@ export interface TaskRecord {
    *  configurations (prompt variants, tool sets, router variants, etc.).
    *  Set via the session POST body; null when not part of an experiment. */
   experiment: { name: string; arm: string } | null;
+  /** Phase A: number of post-edit verification gate failures on this task. */
+  verifyGateFailures: number;
 }
 
 /** Per-model empirical stats for a single day — the capability-matrix seed. */

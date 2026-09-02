@@ -55,6 +55,8 @@ function makeTask(opts: Partial<TaskRecord> = {}): TaskRecord {
     outcome: opts.outcome ?? "silent",
     regime: opts.regime ?? "free",
     provider: opts.provider ?? "openrouter",
+    experiment: opts.experiment ?? null,
+    verifyGateFailures: opts.verifyGateFailures ?? 0,
   };
 }
 

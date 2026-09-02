@@ -137,6 +137,12 @@ export interface ActiveTask {
   lastIterationHadError: boolean;
   /** Whether any tool call has succeeded yet (distinguishes planning from coding). */
   anyToolSuccess: boolean;
+  /** Phase A: number of post-edit verification gate failures on this task. */
+  verifyGateFailures: number;
+  /** Phase A: whether an auto git checkpoint was taken before the first write. */
+  checkpointTaken: boolean;
+  /** Phase A: per-file count of verify gate failures (to cap re-checks at 2). */
+  verifyFailuresByFile: Map<string, number>;
 }
 
 /**
@@ -197,6 +203,7 @@ export class TelemetryStore {
           if (t.retries === undefined) t.retries = 0;
           if (t.fallbacks === undefined) t.fallbacks = 0;
           if (!t.experiment) t.experiment = null;
+          if (t.verifyGateFailures === undefined) t.verifyGateFailures = 0;
         }
         this.data = {
           version: 1,
@@ -280,6 +287,9 @@ export class TelemetryStore {
       testResults: [],
       lastIterationHadError: false,
       anyToolSuccess: false,
+      verifyGateFailures: 0,
+      checkpointTaken: false,
+      verifyFailuresByFile: new Map(),
     };
     this.active.set(taskId, task);
     return task;
@@ -448,6 +458,7 @@ export class TelemetryStore {
       regime: task.regime,
       provider: task.provider,
       experiment: task.experiment,
+      verifyGateFailures: task.verifyGateFailures,
     };
     this.active.delete(task.taskId);
     this.data.recentTasks.unshift(rec);

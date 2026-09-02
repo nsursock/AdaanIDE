@@ -1,9 +1,11 @@
 import type {
   AgentEvent,
+  AgentEventType,
   ChatMessage,
   ProviderMessage,
   ProviderTool,
   ProviderEvent,
+  ProviderTextDelta,
   ToolCall,
   ToolResult,
   ToolContext,
@@ -13,6 +15,16 @@ import type { ToolRegistry } from "./tools/registry.js";
 import type { AgentSession } from "./session.js";
 import { estimateTotalTokens, pruneContext, truncateToolContent } from "./context.js";
 import { buildWorkspaceSnapshot } from "./snapshot.js";
+import type { Workspace } from "../workspace.js";
+import {
+  buildClassifyPrompt,
+  parseClassifyResponse,
+  buildEditPrompt,
+  parseEditResponse,
+  exceedsEditBudget,
+  type FileContent,
+} from "./single-shot.js";
+import { verifyEditedFile } from "./verify.js";
 import { L2_CACHEABLE_TOOLS } from "./workspace-cache.js";
 import { classifyTask, routeModel, DEFAULT_ROUTER_SETTINGS, type RouterSettings } from "../router/index.js";
 import { modelRegistry } from "../registry/index.js";
@@ -33,6 +45,50 @@ const READ_ONLY_TOOLS = new Set([
   "read_file", "list_files", "list_symbols", "search_files", "git_status", "git_diff",
   "execute_command", "run_tests",
 ]);
+/** Consecutive error iterations at the cap that indicate the model is stuck
+ *  (not merely slow). Used by the D9 budget guard to decide whether the
+ *  summary turn should be a continuation nudge (one more chance to finish)
+ *  vs. a plain text summary. */
+const STUCK_ERROR_THRESHOLD = 2;
+
+/**
+ * Compute a normalized hash key for the B1 repeat-failure guard. For tools
+ * whose args contain large text blobs (apply_patch patch, write_file/create_file
+ * content), trailing whitespace is trimmed before hashing so a model can't
+ * evade the guard by adding a trailing newline or spaces to an otherwise
+ * identical failed call. The normalization is conservative — only trailing
+ * whitespace is touched, so genuinely different calls still hash differently.
+ */
+export function argsHashKey(toolName: string, args: Record<string, unknown>): string {
+  const normalized: Record<string, unknown> = { ...args };
+  if (typeof normalized.patch === "string") {
+    normalized.patch = normalized.patch.replace(/\s+$/g, "");
+  }
+  if (typeof normalized.content === "string") {
+    normalized.content = normalized.content.replace(/\s+$/g, "");
+  }
+  return `${toolName}:${JSON.stringify(normalized)}`;
+}
+
+/**
+ * Detect whether an apply_patch error is a *format* problem (the model
+ * structured the patch wrong) vs. a content/hash problem (the patch is
+ * well-formed but doesn't match the file). Format errors benefit from a
+ * directive hint showing the correct structure and the write_file fallback,
+ * because weak models often know the fix but can't get SEARCH/REPLACE
+ * syntax right and burn their whole budget retrying malformed patches.
+ */
+export function isApplyPatchFormatError(errorMsg: string): boolean {
+  return (
+    errorMsg.includes("no REPLACE section") ||
+    errorMsg.includes("No valid SEARCH/REPLACE blocks") ||
+    errorMsg.includes("SEARCH block not found")
+  );
+}
+
+const APPLY_PATCH_FORMAT_HINT =
+  '\n\nFORMAT HINT — apply_patch needs SEARCH/REPLACE markers. Correct structure:\nSEARCH\n<exact original lines copied from read_file output>\nREPLACE\n<the new lines to put in their place>\n---\nTo DELETE lines, use an empty REPLACE section.\nIf you keep getting the format wrong, use write_file instead — pass the ENTIRE corrected file content plus the hash from your last read_file. write_file does NOT need SEARCH/REPLACE markers.';
+
 const SYSTEM_PROMPT = `You are AdaanIDE, an autonomous coding agent integrated into a development IDE.
 You can read, write, search, and execute commands in the user's workspace.
 
@@ -75,6 +131,11 @@ export interface EngineOptions {
   registry: ToolRegistry;
   maxIterations?: number;
   systemPrompt?: string;
+  /** Phase B: optional tool filter — when set, only these tool schemas are
+   *  exposed to the model. Used by the benchmark runner to test edit-format
+   *  variants (e.g. excluding apply_patch to force write_file). Does NOT
+   *  mutate the shared registry. */
+  tools?: string[];
 }
 
 export class AgentEngine {
@@ -82,6 +143,13 @@ export class AgentEngine {
   private registry: ToolRegistry;
   maxIterations: number;
   private systemPrompt: string;
+  /** Phase B: optional tool filter — only these tools are exposed to the model. */
+  private toolFilter: string[] | undefined;
+  /** Phase C: single-shot mode — "auto" (local only), "always", "never". */
+  singleShotMode: "auto" | "always" | "never" = "auto";
+  /** Phase D: when set, the next provider request uses this compact case
+   *  file instead of the full conversation history. Cleared after one use. */
+  private caseFileOverride: ProviderMessage[] | null = null;
   /** Phase 3: adaptive router settings. */
   routerSettings: RouterSettings = DEFAULT_ROUTER_SETTINGS;
   /** Phase 4: whether paid-model exploration is allowed (default off). */
@@ -92,6 +160,7 @@ export class AgentEngine {
     this.registry = opts.registry;
     this.maxIterations = opts.maxIterations ?? MAX_ITERATIONS;
     this.systemPrompt = opts.systemPrompt ?? SYSTEM_PROMPT;
+    this.toolFilter = opts.tools;
   }
 
   /** Phase 6: derive the economic regime for a task from the active provider
@@ -232,6 +301,52 @@ export class AgentEngine {
     // Re-derive regime now that routing may have changed the effective model.
     task.regime = this.deriveRegime(model);
     task.provider = this.deriveProvider(model);
+
+    // E2: pre-flight scope check — if the effective regime is "local" and
+    // the task category is complex (refactor/greenfield) or multiFile signal
+    // is high, emit a scope warning. When routing mode is auto and non-local
+    // tiers are allowed, prefer the cloud free tier for these tasks — a 4B
+    // local model will likely burn iterations without completing.
+    {
+      const scopeCls = classifyTask(userMessage);
+      const isComplexCategory = scopeCls.category === "refactor" || scopeCls.category === "greenfield";
+      const isMultiFile = scopeCls.multiFile > 0.5;
+      if (task.regime === "local" && (isComplexCategory || isMultiFile)) {
+        const reason = isComplexCategory
+          ? `Task category "${scopeCls.category}" is likely too complex for a local model`
+          : `Task touches multiple files (multiFile=${scopeCls.multiFile.toFixed(2)}), likely too complex for a local model`;
+        yield emit("scope.warning", { reason });
+        // When auto-routing with non-local options available, prefer cloud.
+        if (
+          this.routerSettings.mode === "auto" &&
+          this.routerSettings.allowedTiers.length > 1 &&
+          task.regime === "local"
+        ) {
+          // Try to find a free-tier cloud model that's tools-capable.
+          try {
+            const freeModels = modelRegistry.byTier("free").filter((e) => e.toolsCapable);
+            if (freeModels.length > 0) {
+              const oldModel = model;
+              model = freeModels[0].id;
+              task.regime = this.deriveRegime(model);
+              task.provider = this.deriveProvider(model);
+              yield emit("model.routed", {
+                model,
+                category: scopeCls.category,
+                reason: `${reason}; rerouted to cloud free tier`,
+                classification: {
+                  complexity: scopeCls.complexity,
+                  coding: scopeCls.coding,
+                  reasoning: scopeCls.reasoning,
+                },
+              });
+            }
+          } catch {
+            // Registry not loaded — skip rerouting, just emit the warning.
+          }
+        }
+      }
+    }
     const finalizeTask = (): TaskSummaryData => {
       if (taskFinalized) return {} as TaskSummaryData;
       taskFinalized = true;
@@ -240,6 +355,16 @@ export class AgentEngine {
       if (taskStatus === "success" && task.testResults.length > 0) {
         const outcome = detectOutcome(task.testResults);
         task.outcome = outcome;
+      }
+      // D12: when the task ended in error (e.g. stuck in tool errors at the
+      // iteration cap), the outcome must reflect failure — not the default
+      // "silent" (weight 0.7) which the learning system would interpret as
+      // a weak positive signal. Respect monotonicity: never downgrade
+      // verified/accepted (which would only happen if tests passed but
+      // later iterations errored — extremely unlikely since a passing test
+      // run resets consecutiveErrors, but guard against it anyway).
+      if (taskStatus === "error" && task.outcome !== "verified" && task.outcome !== "accepted") {
+        task.outcome = "rejected";
       }
 
       const rec = telemetryStore.finishTask(task, taskStatus);
@@ -277,11 +402,40 @@ export class AgentEngine {
     };
 
     try {
+      // Phase C: single-shot pipeline for weak-tier models. Check whether
+      // single-shot mode should be used for this task's regime.
+      const useSingleShot =
+        this.singleShotMode === "always" ||
+        (this.singleShotMode === "auto" && task.regime === "local");
+
+      if (useSingleShot) {
+        let singleShotHandled = false;
+        for await (const ev of this.runSingleShotPipeline(session, workspace, userMessage, model, task)) {
+          yield ev;
+          if (ev.type === "done") {
+            singleShotHandled = true;
+          }
+        }
+        // If the pipeline emitted "done", the task is complete.
+        if (singleShotHandled || (task as any)._singleShotDone) {
+          taskStatus = "success";
+          yield emit("task.summary", finalizeTask());
+          return;
+        }
+        // Otherwise, fall through to the normal ReAct loop.
+      }
+
       let iteration = 0;
       let consecutiveErrors = 0;  // Phase 3: escalation trigger
       let consecutiveReadonlyIters = 0;  // exploration cap
+      // D9: dynamic iteration budget. When the model hits the cap while
+      // stuck in errors on an action request, we grant a small bonus so it
+      // gets a real tool-capable turn to recover (the "one tool call away
+      // from finishing" failure mode). The bonus fires at most once per task.
+      let effectiveMaxIterations = this.maxIterations;
+      let continuationBonusUsed = false;
 
-      while (iteration < this.maxIterations) {
+      while (iteration < effectiveMaxIterations) {
         // If a new turn superseded this one (session.resume() was called
         // by another engine.run() invocation), exit silently — the new
         // generator owns the session now. Emitting cancelled/error here
@@ -296,25 +450,42 @@ export class AgentEngine {
         }
 
         // Build provider messages from session
-        let providerMessages = this.buildProviderMessages(session);
+        let providerMessages: ProviderMessage[];
+        if (this.caseFileOverride) {
+          // Phase D: use the compact case file for the first request after
+          // escalation, then resume normal history building.
+          providerMessages = this.caseFileOverride;
+          this.caseFileOverride = null;
+        } else {
+          providerMessages = this.buildProviderMessages(session);
+        }
 
         // A3: inject a workspace snapshot on the first request of the session
         // (when no assistant message has been sent yet). This kills the common
         // "exploration" request where the model calls list_files just to orient.
-        // The snapshot is merged INTO the system prompt (not inserted as a
-        // separate system message) because some local model chat templates
-        // (e.g. Qwen3.5 on Rapid-MLX) reject multiple system messages.
+        // E1: the snapshot is appended to the first USER message (not the
+        // system prompt) so the system prompt stays constant and benefits
+        // from prefix-cache reuse on local servers (Rapid-MLX caches on
+        // identical prefixes). Qwen chat templates accept long user messages
+        // fine.
         const hasAssistantMsg = session.messages.some((m) => m.role === "assistant");
         if (!hasAssistantMsg && !task.snapshotInjected) {
           try {
             const snapshot = await buildWorkspaceSnapshot(workspace);
             if (snapshot) {
-              providerMessages[0] = {
-                ...providerMessages[0],
-                content:
-                  providerMessages[0].content +
-                  `\n\nWorkspace snapshot (do not call list_files if this already answers your question):\n${snapshot}`,
-              };
+              // Find the first user message in providerMessages (index 0
+              // is the system prompt).
+              const firstUserIdx = providerMessages.findIndex(
+                (m) => m.role === "user",
+              );
+              if (firstUserIdx >= 0) {
+                providerMessages[firstUserIdx] = {
+                  ...providerMessages[firstUserIdx],
+                  content:
+                    providerMessages[firstUserIdx].content +
+                    `\n\nWorkspace snapshot (do not call list_files if this already answers your question):\n${snapshot}`,
+                };
+              }
               task.snapshotInjected = true;
             }
           } catch {
@@ -342,8 +513,11 @@ export class AgentEngine {
         const requestType: RequestType = telemetryStore.classifyRequest(task);
         const requestStart = Date.now();
 
-        // Get tools
-        const tools: ProviderTool[] = this.registry.allSchemas as ProviderTool[];
+        // Get tools — apply optional tool filter (Phase B: benchmark experiments)
+        const allSchemas = this.registry.allSchemas as ProviderTool[];
+        const tools: ProviderTool[] = this.toolFilter
+          ? allSchemas.filter((t) => this.toolFilter!.includes(t.function.name))
+          : allSchemas;
 
         // Call provider
         let assistantContent = "";
@@ -451,17 +625,39 @@ export class AgentEngine {
               }
               case "tool_call.complete": {
                 const data = ev.data as { index: number; toolCallId: string; toolName: string; arguments: string };
+                // D19: normalize empty/malformed arguments to "{}" so the
+                // stored ToolCall is always valid JSON. Some free models
+                // (e.g. cohere/north-mini-code) emit an empty string or
+                // malformed JSON as tool arguments. If we store it as-is,
+                // the next provider request sends the malformed arguments
+                // back, causing a 400: "tool arguments must be a stringified
+                // JSON object". Normalizing here ensures the stored call is
+                // always provider-safe.
+                let normalizedArgs = data.arguments;
+                if (!normalizedArgs || !normalizedArgs.trim()) {
+                  normalizedArgs = "{}";
+                } else {
+                  try {
+                    JSON.parse(normalizedArgs);
+                  } catch {
+                    // Malformed JSON — normalize to "{}" so the stored call
+                    // doesn't poison the next request. The tool execution
+                    // loop below will emit a tool.error for the malformed
+                    // args, giving the model a chance to retry.
+                    normalizedArgs = "{}";
+                  }
+                }
                 const tc: ToolCall = {
                   id: data.toolCallId,
                   type: "function",
-                  function: { name: data.toolName, arguments: data.arguments },
+                  function: { name: data.toolName, arguments: normalizedArgs },
                 };
                 assistantToolCalls.push(tc);
 
                 // Parse args and emit
                 let parsedArgs: Record<string, unknown> = {};
                 try {
-                  parsedArgs = JSON.parse(data.arguments || "{}");
+                  parsedArgs = JSON.parse(normalizedArgs);
                 } catch {
                   // malformed args — will be handled as tool error below
                 }
@@ -682,7 +878,13 @@ export class AgentEngine {
             }
           }
           session.status = "done";
-          taskStatus = "success";
+          // D12: if the model stopped calling tools after a streak of
+          // consecutive errors, it likely gave up without completing the
+          // task. Mark as error so the experiment/learning system doesn't
+          // count it as a success. (If the model genuinely finished, the
+          // last iteration wouldn't have had errors, so consecutiveErrors
+          // would be 0.)
+          taskStatus = consecutiveErrors >= STUCK_ERROR_THRESHOLD ? "error" : "success";
           yield emit("done");
           yield emit("task.summary", finalizeTask());
           return;
@@ -817,8 +1019,11 @@ export class AgentEngine {
           // B1: repeat-failure guard — if the exact same tool+args already
           // failed earlier this session and no write has succeeded since,
           // skip execution and return the cached error. Prevents the model
-          // from burning iterations on identical broken calls.
-          const argsHash = `${tc.function.name}:${JSON.stringify(parsedArgs)}`;
+          // from burning iterations on identical broken calls. The hash is
+          // whitespace-normalized for text-blob args (patch/content) so a
+          // model can't evade the guard by adding a trailing newline to an
+          // otherwise identical failed call.
+          const argsHash = argsHashKey(tc.function.name, parsedArgs);
           const priorError = session.failedCallCache.get(argsHash);
           if (priorError) {
             const guardMsg = `${priorError}\n\nYou already tried this exact call and it failed. Do NOT repeat it unchanged — fix the arguments or change approach.`;
@@ -895,6 +1100,57 @@ export class AgentEngine {
               // clear the failure cache so it can retry previously-failed
               // calls with the new file state.
               session.failedCallCache.clear();
+
+              // Phase A3: auto git checkpoint before the first write of a task.
+              // Best-effort — silently skip if not a git repo.
+              if (!task.checkpointTaken) {
+                try {
+                  await workspace.gitCheckpoint("auto: pre-task checkpoint");
+                  task.checkpointTaken = true;
+                } catch {
+                  // Not a git repo or git unavailable — skip silently.
+                  task.checkpointTaken = true;
+                }
+              }
+
+              // Phase A2: post-edit verification gate. Run the cheapest
+              // file-scoped syntax check on the edited file. On failure,
+              // convert into the existing tool-error path so B1 guard +
+              // Phase-3 escalation engage automatically. Skip after 2
+              // failures on the same file to avoid infinite loops.
+              if (filePath && tc.function.name !== "delete_file") {
+                const fileFailCount = task.verifyFailuresByFile.get(filePath) ?? 0;
+                if (fileFailCount < 2) {
+                  const verifyResult = await verifyEditedFile(workspace, filePath);
+                  if (verifyResult.checkRan && !verifyResult.ok) {
+                    const verifyError = `Syntax check failed after edit:\n${verifyResult.errors}`;
+                    task.verifyGateFailures++;
+                    task.verifyFailuresByFile.set(filePath, fileFailCount + 1);
+
+                    // Emit tool.error so the UI shows the failure in red.
+                    yield emit("tool.error", {
+                      toolCallId: tc.id,
+                      toolName: tc.function.name,
+                      error: verifyError,
+                    });
+                    telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: false });
+                    iterationHadError = true;
+                    // Record in B1 cache so an identical write isn't re-executed.
+                    session.failedCallCache.set(argsHash, verifyError);
+                    session.messages.push({
+                      role: "tool",
+                      content: JSON.stringify({
+                        error: "Syntax check failed after edit",
+                        diagnostics: verifyResult.errors,
+                        verifyGate: true,
+                      }),
+                      toolCallId: tc.id,
+                      name: tc.function.name,
+                    });
+                    continue;  // skip the normal success-path message push below
+                  }
+                }
+              }
             }
 
             // A1: truncate large tool results before they enter conversation
@@ -913,8 +1169,18 @@ export class AgentEngine {
               name: tc.function.name,
             });
           } catch (e: any) {
-            const errorMsg = e.message ?? "Tool execution failed";
+            let errorMsg = e.message ?? "Tool execution failed";
             const isConflict = e.code === "HASH_MISMATCH" || e.code === "HASH_REQUIRED";
+            // D10: apply_patch format-failure recovery — when the model
+            // structures a patch wrong (no REPLACE, no valid blocks, search
+            // not found), append a directive hint showing the correct format
+            // and the write_file fallback. Weak models often know the fix
+            // but can't get SEARCH/REPLACE syntax right and burn their whole
+            // budget retrying malformed patches; the hint + fallback gives
+            // them a path to succeed on the next attempt.
+            if (tc.function.name === "apply_patch" && isApplyPatchFormatError(errorMsg)) {
+              errorMsg = errorMsg + APPLY_PATCH_FORMAT_HINT;
+            }
 
             yield emit("tool.error", {
               toolCallId: tc.id,
@@ -924,7 +1190,9 @@ export class AgentEngine {
             telemetryStore.recordToolCall(task, tc.function.name, { cached: false, success: false });
             iterationHadError = true;
             // B1: record this failure so an identical call isn't re-executed.
-            session.failedCallCache.set(argsHash, errorMsg);
+            // Store the base error (without the format hint) so the B1 guard
+            // message stays concise when it fires.
+            session.failedCallCache.set(argsHash, e.message ?? "Tool execution failed");
 
             session.messages.push({
               role: "tool",
@@ -951,7 +1219,7 @@ export class AgentEngine {
         } else {
           consecutiveReadonlyIters = 0;
         }
-        if (consecutiveReadonlyIters >= MAX_EXPLORATION_ITERATIONS && iteration < this.maxIterations - 1) {
+        if (consecutiveReadonlyIters >= MAX_EXPLORATION_ITERATIONS && iteration < effectiveMaxIterations - 1) {
           session.messages.push({
             role: "user",
             content: "You've spent several iterations exploring the codebase. Stop reading files and either: (1) write a brief plan of what you'll change, then immediately start implementing it, or (2) start making changes now with apply_patch/create_file. Do not call any more read-only tools unless strictly necessary.",
@@ -992,7 +1260,45 @@ export class AgentEngine {
                 to: model,
                 reason: "repeated tool failures",
               });
+
+              // Phase D: build a compact case file for the escalated model
+              // instead of sending the full conversation history. The
+              // stronger model gets a distilled problem statement + current
+              // file state + last errors, which is cheaper and easier to
+              // solve than a long transcript of the weak model's failures.
+              this.caseFileOverride = await this.buildCaseFile(session, workspace);
             }
+          }
+        }
+
+        // D9: stuck-in-errors recovery — if the model has reached the
+        // iteration cap while stuck on a streak of tool errors for an
+        // action request, grant a 2-iteration bonus so it gets a real
+        // tool-capable turn to apply the fix it likely already knows.
+        // This catches the common "one tool call away from finishing"
+        // failure mode: the model diagnosed the bug, knows the fix, but
+        // burned its budget retrying a malformed apply_patch. The bonus
+        // fires at most once per task, and the nudge points the model at
+        // the write_file fallback (no SEARCH/REPLACE markers needed) so
+        // even models that can't get patch formatting right can finish.
+        if (
+          iteration >= effectiveMaxIterations &&
+          consecutiveErrors >= STUCK_ERROR_THRESHOLD &&
+          !continuationBonusUsed
+        ) {
+          const initialUserPrompt =
+            session.messages.find((m) => m.role === "user")?.content.trim() ?? "";
+          const isActionReq = /^(code|build|create|implement|make|write|develop|generate|setup|set up|adapt|port|rewrite|fix|test|debug|refactor)\b/i.test(
+            initialUserPrompt,
+          );
+          if (isActionReq) {
+            continuationBonusUsed = true;
+            effectiveMaxIterations += 2;
+            session.messages.push({
+              role: "user",
+              content:
+                "You've reached the tool-call limit but your last attempts failed with errors — you appear to be one step away from finishing. You have 2 more attempts. Fix the error from your last tool call and apply the change now. If apply_patch keeps failing on formatting, use write_file instead — pass the ENTIRE corrected file content plus the hash from your last read_file. write_file does NOT need SEARCH/REPLACE markers. Do not re-explain the fix in text — write it to disk.",
+            });
           }
         }
       }
@@ -1012,12 +1318,14 @@ export class AgentEngine {
 
       const summaryMessages = this.buildProviderMessages(session);
 
-      // If the user asked for an action (code/build/create) but no files
-      // were modified during the task, the model burned all iterations on
-      // exploration/commands without producing the requested work. Instead
-      // of a text-only summary that ends with a "plan", inject a
-      // continuation nudge so the model starts writing files immediately
-      // in the summary turn (which allows tool calls).
+      // D9: action-request budget guard. If the user asked for an action
+      // (code/build/create) but no files were modified during the task, the
+      // model burned all iterations on exploration/commands without producing
+      // the requested work — inject a continuation nudge instead of a
+      // text-only "plan". Also fires when the model ended stuck in a streak
+      // of tool errors (even if files were modified earlier) so it honestly
+      // reports the failure and the error it couldn't fix, rather than
+      // claiming success.
       const filesModifiedInSession = session.messages.some(
         (m) =>
           m.role === "assistant" &&
@@ -1029,10 +1337,16 @@ export class AgentEngine {
       const isActionRequest = /^(code|build|create|implement|make|write|develop|generate|setup|set up|adapt|port|rewrite)\b/i.test(
         initialUserPrompt,
       );
+      const stuckInErrors = consecutiveErrors >= STUCK_ERROR_THRESHOLD;
       if (isActionRequest && !filesModifiedInSession) {
         summaryMessages.push({
           role: "user",
           content: "You've reached the tool-call limit but haven't written any files yet. Stop exploring and start implementing NOW. Use create_file or apply_patch to write the code the user asked for. Do not call read_file, list_files, or execute_command — write the files directly.",
+        });
+      } else if (isActionRequest && stuckInErrors) {
+        summaryMessages.push({
+          role: "user",
+          content: "You've reached the tool-call limit and your last attempts failed with errors. Do not call any more tools. Summarize what you accomplished, honestly state that the task is incomplete, quote the last error you could not fix, and tell the user exactly what change is still needed so they can apply it themselves or ask you to continue.",
         });
       } else {
         summaryMessages.push({
@@ -1193,7 +1507,13 @@ export class AgentEngine {
         session.messages.push({ role: "assistant", content: fallback });
       }
       session.status = "done";
-      taskStatus = "success";
+      // D12: if the model hit the iteration cap while stuck in a streak of
+      // tool errors, the task did not succeed — even if the summary turn
+      // produced text. Without this, the experiment/learning system counts
+      // "model wrote a summary explaining why it failed" as a 100% success,
+      // which is the exact bug that let the PPO/CartPole task score as
+      // successful despite ending with broken, unfixed code.
+      taskStatus = consecutiveErrors >= STUCK_ERROR_THRESHOLD ? "error" : "success";
       yield emit("done");
       yield emit("task.summary", finalizeTask());
     } catch (e: any) {
@@ -1257,6 +1577,300 @@ export class AgentEngine {
     msgs.splice(lastAssistantIdx);
   }
 
+  /** Phase C: run the single-shot pipeline for weak-tier models.
+   *  Returns true if the pipeline handled the task (either success or
+   *  fallback to ReAct), false if it should not run (and the normal ReAct
+   *  loop should proceed). Emits existing events so the UI keeps working. */
+  private async *runSingleShotPipeline(
+    session: AgentSession,
+    workspace: Workspace,
+    userMessage: string,
+    model: string,
+    task: ActiveTask,
+  ): AsyncGenerator<AgentEvent> {
+    const emit = (type: AgentEventType, data?: unknown): AgentEvent => ({
+      type,
+      sessionId: session.id,
+      data,
+      timestamp: Date.now(),
+    });
+
+    // Step 1: Classify call — fresh message array, no transcript.
+    const fileTree = await buildWorkspaceSnapshot(workspace);
+    const classifyPrompt = buildClassifyPrompt(userMessage, fileTree ?? "");
+    const classifyMessages: ProviderMessage[] = [
+      { role: "system", content: "You are a task classifier. Respond concisely." },
+      { role: "user", content: classifyPrompt },
+    ];
+
+    let classifyRaw = "";
+    try {
+      const stream = this.provider.chat(classifyMessages, {
+        model,
+        signal: session.abortController.signal,
+      });
+      for await (const ev of stream) {
+        if (ev.type === "text.delta") {
+          classifyRaw += (ev.data as ProviderTextDelta)?.text ?? "";
+        }
+      }
+    } catch {
+      // Classification failed — fall back to ReAct.
+      yield emit("text.delta", { text: "[Single-shot classification failed, falling back to ReAct loop]" });
+      return;
+    }
+
+    const classifyResult = parseClassifyResponse(classifyRaw);
+    if (!classifyResult) {
+      yield emit("text.delta", { text: "[Single-shot classification unclear, falling back to ReAct loop]" });
+      return;
+    }
+
+    // null/reject/search → fall back to ReAct
+    if (classifyResult.action === "reject" || classifyResult.action === "search") {
+      yield emit("text.delta", { text: "[Single-shot: " + (classifyResult.reason || "task not suitable for single-shot") + ", falling back to ReAct loop]" });
+      return;
+    }
+
+    // explain → one normal chat completion, done.
+    if (classifyResult.action === "explain") {
+      const explainMessages: ProviderMessage[] = [
+        { role: "system", content: this.systemPrompt },
+        { role: "user", content: userMessage },
+      ];
+      try {
+        const stream = this.provider.chat(explainMessages, {
+          model,
+          signal: session.abortController.signal,
+        });
+        for await (const ev of stream) {
+          if (ev.type === "text.delta") {
+            yield emit("text.delta", ev.data);
+          }
+        }
+      } catch (e) {
+        yield emit("text.delta", { text: "Error: " + (e instanceof Error ? e.message : String(e)) });
+      }
+      yield emit("done");
+      // Mark task as done — the caller should check for this.
+      (task as any)._singleShotDone = true;
+      return;
+    }
+
+    // edit/create → read target files, edit call, write, verify.
+    if (classifyResult.action === "edit" || classifyResult.action === "create") {
+      if (classifyResult.targetFiles.length === 0) {
+        yield emit("text.delta", { text: "[Single-shot: no target files specified, falling back to ReAct]" });
+        return;
+      }
+
+      // Read target files (for edit only — create doesn't need existing content).
+      const files: FileContent[] = [];
+      if (classifyResult.action === "edit") {
+        for (const filePath of classifyResult.targetFiles) {
+          try {
+            const { content } = await workspace.readFile(filePath);
+            files.push({ path: filePath, content });
+          } catch {
+            // File doesn't exist — skip it (model may want to create it).
+          }
+        }
+        if (files.length === 0) {
+          yield emit("text.delta", { text: "[Single-shot: target files not found, falling back to ReAct]" });
+          return;
+        }
+        if (exceedsEditBudget(files)) {
+          yield emit("text.delta", { text: "[Single-shot: target files too large, falling back to ReAct]" });
+          return;
+        }
+      }
+
+      // Edit call — fresh message array.
+      const editPrompt = buildEditPrompt(userMessage, files);
+      const editMessages: ProviderMessage[] = [
+        { role: "system", content: "You are a code editor. Output complete file contents." },
+        { role: "user", content: editPrompt },
+      ];
+
+      let editRaw = "";
+      try {
+        const stream = this.provider.chat(editMessages, {
+          model,
+          signal: session.abortController.signal,
+        });
+        for await (const ev of stream) {
+          if (ev.type === "text.delta") {
+            editRaw += (ev.data as ProviderTextDelta)?.text ?? "";
+          }
+        }
+      } catch {
+        yield emit("text.delta", { text: "[Single-shot: edit call failed, falling back to ReAct]" });
+        return;
+      }
+
+      const parsedEdits = parseEditResponse(editRaw);
+      if (parsedEdits.length === 0) {
+        yield emit("text.delta", { text: "[Single-shot: no file blocks in response, falling back to ReAct]" });
+        return;
+      }
+
+      // Write files via workspace, respecting hash-based concurrency.
+      for (const edit of parsedEdits) {
+        try {
+          // Read current hash for existing files.
+          let expectedHash: string | undefined;
+          try {
+            const { hash } = await workspace.readFile(edit.path);
+            expectedHash = hash;
+          } catch {
+            // New file — no hash needed.
+          }
+
+          await workspace.writeFile(edit.path, edit.content, expectedHash);
+
+          // Emit tool events so the UI shows activity.
+          yield emit("tool.start", { toolCallId: "ss-" + edit.path, toolName: "write_file" });
+          yield emit("tool.result", {
+            toolCallId: "ss-" + edit.path,
+            toolName: "write_file",
+            result: { path: edit.path, lines: edit.content.split("\n").length },
+          });
+
+          // Phase A: verify the written file.
+          const verifyResult = await verifyEditedFile(workspace, edit.path);
+          if (verifyResult.checkRan && !verifyResult.ok) {
+            // One repair attempt.
+            const repairPrompt = "The file " + edit.path + " has a syntax error after your edit:\n" +
+              verifyResult.errors + "\n\nPlease output the corrected complete file content.\n\n" +
+              "FILE: " + edit.path + "\n```\n" + edit.content + "\n```";
+            const repairMessages: ProviderMessage[] = [
+              { role: "system", content: "You are a code editor. Fix the syntax error and output the complete file." },
+              { role: "user", content: repairPrompt },
+            ];
+            let repairRaw = "";
+            try {
+              const repairStream = this.provider.chat(repairMessages, {
+                model,
+                signal: session.abortController.signal,
+              });
+              for await (const ev of repairStream) {
+                if (ev.type === "text.delta") {
+                  repairRaw += (ev.data as ProviderTextDelta)?.text ?? "";
+                }
+              }
+              const repairEdits = parseEditResponse(repairRaw);
+              if (repairEdits.length > 0) {
+                await workspace.writeFile(edit.path, repairEdits[0].content, expectedHash);
+                // Verify again — if still failing, fall back to ReAct.
+                const reverify = await verifyEditedFile(workspace, edit.path);
+                if (reverify.checkRan && !reverify.ok) {
+                  yield emit("tool.error", {
+                    toolCallId: "ss-" + edit.path,
+                    toolName: "write_file",
+                    error: "Syntax check still failing after repair:\n" + reverify.errors,
+                  });
+                  yield emit("text.delta", { text: "[Single-shot: repair failed, falling back to ReAct]" });
+                  return;
+                }
+              }
+            } catch {
+              yield emit("text.delta", { text: "[Single-shot: repair call failed, falling back to ReAct]" });
+              return;
+            }
+          }
+
+          task.filesModified++;
+        } catch (e) {
+          yield emit("tool.error", {
+            toolCallId: "ss-" + edit.path,
+            toolName: "write_file",
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+
+      // Emit a summary text.
+      yield emit("text.delta", {
+        text: "Modified " + parsedEdits.length + " file(s): " + parsedEdits.map((e) => e.path).join(", "),
+      });
+      yield emit("done");
+      (task as any)._singleShotDone = true;
+      return;
+    }
+  }
+
+  /** Phase D: build a compact case file for the escalated model. Contains
+   *  the original user request, current file contents of modified files,
+   *  and the last 3 tool error messages — instead of the full transcript. */
+  private async buildCaseFile(
+    session: AgentSession,
+    workspace: Workspace,
+  ): Promise<ProviderMessage[]> {
+    // Original user request = first user message in session.
+    const firstUserMsg = session.messages.find((m) => m.role === "user");
+    const userRequest = firstUserMsg?.content ?? "(no user message found)";
+
+    // Files modified so far — find write-family tool calls in the transcript
+    // and read their current content from the workspace.
+    const modifiedPaths = new Set<string>();
+    for (const msg of session.messages) {
+      if (msg.role === "assistant" && msg.toolCalls) {
+        for (const tc of msg.toolCalls) {
+          if (["write_file", "apply_patch", "create_file"].includes(tc.function.name)) {
+            const args = tc.function.arguments;
+            const parsed = typeof args === "string" ? JSON.parse(args) : args;
+            const path = (parsed as Record<string, unknown>)?.path as string | undefined;
+            if (path) modifiedPaths.add(path);
+          }
+        }
+      }
+    }
+
+    // Read current content of modified files (truncate each to ~800 chars).
+    const fileSections: string[] = [];
+    for (const filePath of modifiedPaths) {
+      try {
+        const { content } = await workspace.readFile(filePath);
+        const truncated = content.length > 800
+          ? content.slice(0, 800) + "\n... (truncated)"
+          : content;
+        fileSections.push("FILE: " + filePath + "\n" + truncated);
+      } catch {
+        fileSections.push("FILE: " + filePath + " (could not read)");
+      }
+    }
+
+    // Last 3 tool error messages (truncated 300 chars each).
+    const errorMessages: string[] = [];
+    for (const msg of session.messages) {
+      if (msg.role === "tool") {
+        try {
+          const parsed = JSON.parse(msg.content);
+          if (parsed.error) {
+            errorMessages.push(String(parsed.error).slice(0, 300));
+          }
+        } catch {
+          // Not JSON — skip.
+        }
+      }
+    }
+    const lastErrors = errorMessages.slice(-3);
+
+    // Build the case file as a system + user message pair.
+    const caseFileContent =
+      "USER REQUEST:\n" + userRequest + "\n\n" +
+      "FILES MODIFIED SO FAR:\n" +
+      (fileSections.length > 0 ? fileSections.join("\n\n") : "(none)") + "\n\n" +
+      "LAST ERRORS:\n" +
+      (lastErrors.length > 0 ? lastErrors.map((e) => "- " + e).join("\n") : "(none)") + "\n\n" +
+      "INSTRUCTION: Continue this task. Previous model failed repeatedly.";
+
+    return [
+      { role: "system", content: this.systemPrompt },
+      { role: "user", content: caseFileContent },
+    ];
+  }
+
   private buildProviderMessages(session: AgentSession): ProviderMessage[] {
     const messages: ProviderMessage[] = [
       { role: "system", content: this.systemPrompt },
@@ -1268,7 +1882,23 @@ export class AgentEngine {
         content: msg.content,
       };
       if (msg.toolCalls && msg.toolCalls.length > 0) {
-        pm.tool_calls = msg.toolCalls;
+        // D19: safety net — normalize any tool calls with empty/malformed
+        // arguments before sending to the provider. This catches calls
+        // that slipped through the tool_call.complete normalization (e.g.
+        // from older sessions loaded from disk) and prevents 400 errors
+        // from strict providers like Cohere.
+        pm.tool_calls = msg.toolCalls.map((tc) => {
+          const args = tc.function.arguments;
+          if (!args || !args.trim()) {
+            return { ...tc, function: { ...tc.function, arguments: "{}" } };
+          }
+          try {
+            JSON.parse(args);
+            return tc;
+          } catch {
+            return { ...tc, function: { ...tc.function, arguments: "{}" } };
+          }
+        });
       }
       if (msg.toolCallId) {
         pm.tool_call_id = msg.toolCallId;

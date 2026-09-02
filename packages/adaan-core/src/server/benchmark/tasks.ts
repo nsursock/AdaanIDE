@@ -8,6 +8,85 @@ export interface BenchmarkTask {
   verify: (ws: Workspace) => Promise<{ pass: boolean; detail: string }>;
 }
 
+/** Shared scaffold for the edit-format experiment — a 50-line calculator
+ *  module with a bug in divide(). Big enough that full rewrite is nontrivial
+ *  for a 4B model, small enough to fit in context. */
+const EDIT_FORMAT_SCAFFOLD = `class Calculator:
+    def __init__(self):
+        self.history = []
+
+    def add(self, a, b):
+        result = a + b
+        self.history.append(f"{a} + {b} = {result}")
+        return result
+
+    def subtract(self, a, b):
+        result = a - b
+        self.history.append(f"{a} - {b} = {result}")
+        return result
+
+    def multiply(self, a, b):
+        result = a * b
+        self.history.append(f"{a} * {b} = {result}")
+        return result
+
+    def divide(self, a, b):
+        if b == 0:
+            raise ValueError("Cannot divide by zero")
+        result = a * b  # BUG: should be a / b
+        self.history.append(f"{a} / {b} = {result}")
+        return result
+
+    def power(self, a, b):
+        result = a ** b
+        self.history.append(f"{a} ** {b} = {result}")
+        return result
+
+    def modulo(self, a, b):
+        if b == 0:
+            raise ValueError("Cannot modulo by zero")
+        result = a % b
+        self.history.append(f"{a} % {b} = {result}")
+        return result
+
+    def clear_history(self):
+        self.history = []
+
+    def get_history(self):
+        return list(self.history)
+
+    def average(self, numbers):
+        if not numbers:
+            return 0
+        return sum(numbers) / len(numbers)
+
+    def factorial(self, n):
+        if n < 0:
+            raise ValueError("Cannot compute factorial of negative number")
+        if n <= 1:
+            return 1
+        result = 1
+        for i in range(2, n + 1):
+            result *= i
+        return result
+`;
+
+/** Shared verify for all three edit-format variants — the bug must be fixed
+ *  AND the rest of the file must be intact (so truncated rewrites fail). */
+async function editFormatVerify(ws: Workspace): Promise<{ pass: boolean; detail: string }> {
+  const { content } = await ws.readFile("calculator.py");
+  // Bug fix: divide must use a / b, not a * b
+  const hasFix = content.includes("a / b") && !content.includes("a * b  # BUG");
+  if (!hasFix) return { pass: false, detail: "divide() still has the bug (a * b)" };
+  // Integrity: all other functions must still be present
+  const requiredFunctions = ["add", "subtract", "multiply", "power", "modulo", "clear_history", "get_history", "average", "factorial"];
+  const missing = requiredFunctions.filter((fn) => !content.includes(`def ${fn}(`));
+  if (missing.length > 0) return { pass: false, detail: `Missing functions: ${missing.join(", ")}` };
+  // The class definition must still be there
+  if (!content.includes("class Calculator:")) return { pass: false, detail: "Missing Calculator class" };
+  return { pass: true, detail: "divide() fixed, all functions intact" };
+}
+
 /**
  * 10 benchmark tasks — one per category. Scaffolds are tiny self-contained
  * projects. verify() is deterministic: run tests, grep file contents, check
@@ -168,5 +247,36 @@ export const BENCHMARK_TASKS: BenchmarkTask[] = [
       // The runner will check that the agent executed a command.
       return { pass: true, detail: "Terminal task — verified by runner" };
     },
+  },
+  // --- Phase B: Edit-format experiment tasks (same bug, 3 variants) --------
+  // The scaffold is a 50-line Python file with a bug in one function.
+  // All three variants share the same verify() — the bug must be fixed AND
+  // the rest of the file must be unchanged (so truncated rewrites fail).
+  {
+    id: "edit-format-patch",
+    scaffold: {
+      "calculator.py": EDIT_FORMAT_SCAFFOLD,
+    },
+    prompt: "Fix the bug in the divide() function in calculator.py — it returns a * b instead of a / b. Use apply_patch to make the fix.",
+    maxIterations: 4,
+    verify: editFormatVerify,
+  },
+  {
+    id: "edit-format-rewrite",
+    scaffold: {
+      "calculator.py": EDIT_FORMAT_SCAFFOLD,
+    },
+    prompt: "Fix the bug in the divide() function in calculator.py — it returns a * b instead of a / b. Use write_file to rewrite the entire file with the fix.",
+    maxIterations: 4,
+    verify: editFormatVerify,
+  },
+  {
+    id: "edit-format-directed-patch",
+    scaffold: {
+      "calculator.py": EDIT_FORMAT_SCAFFOLD,
+    },
+    prompt: "Fix the bug in the divide() function in calculator.py — it returns a * b instead of a / b.\n\nUse apply_patch with this exact format:\nSEARCH\n<exact original lines from the file>\nREPLACE\n<new lines to put in their place>\n---\n\nCopy the SEARCH lines exactly from read_file output. The SEARCH text must match the file exactly.",
+    maxIterations: 4,
+    verify: editFormatVerify,
   },
 ];
