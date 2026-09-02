@@ -4,7 +4,7 @@
 
 // --- Themes -----------------------------------------------------------------
 
-export type ThemeId = "retrowave" | "ghibli" | "fiesta" | "dawn";
+export type ThemeId = "retrowave" | "ghibli" | "fiesta" | "dawn" | "synthwave84" | "solarizedDark";
 
 export interface ThemePalette {
   id: ThemeId;

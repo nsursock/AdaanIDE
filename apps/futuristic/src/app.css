@@ -178,6 +178,97 @@
   --backdrop-rgb: 70, 60, 90;
 }
 
+:root[data-theme="synthwave84"] {
+  --color-bg: #1a1126;
+  --color-surface: rgba(var(--surface-1-rgb), 0.65);
+  --color-surface-solid: #34294f;
+  --color-surface-hover: rgba(60, 47, 92, 0.75);
+  --color-surface-glass: linear-gradient(160deg, rgba(var(--surface-1-rgb), 0.8), rgba(var(--surface-2-rgb), 0.9));
+  /* Synthwave '84: signature hot pink + cyan neon on a deep plum backdrop,
+     warmed by golden-sun yellow. Distinct from Retrowave's near-black bg and
+     Fiesta's indigo — this is the classic '84 plum with softer, rounder neons. */
+  --color-accent: #ff7edb;
+  --color-accent-secondary: #36f9f6;
+  --color-accent-cyan: #fede5d;
+  --color-accent-glow: rgba(var(--accent-rgb), 0.42);
+  --color-cyan-glow: rgba(var(--accent-3-rgb), 0.42);
+  --color-purple-glow: rgba(var(--accent-2-rgb), 0.42);
+  --color-text: #fefefe;
+  --color-muted: #848bbd;
+  --color-success: #36f9f6;
+  --color-warning: #fede5d;
+  --color-error: #ff7edb;
+  --color-border: rgba(var(--muted-rgb), 0.3);
+  --color-border-accent: rgba(var(--accent-rgb), 0.4);
+  --color-selection: rgba(var(--accent-rgb), 0.3);
+  --glow-accent: 0 0 22px var(--color-accent-glow);
+  --glow-text: 0 0 10px var(--color-accent-glow);
+  /* Synthwave horizon: golden sun → hot pink → cyan neon */
+  --gradient-spectrum: linear-gradient(90deg, #fede5d 0%, #ff7edb 33%, #f92aad 50%, #36f9f6 75%, #ff7edb 100%);
+
+  /* RGB channels for rgba() tints */
+  --accent-rgb: 255, 126, 219;
+  --accent-2-rgb: 54, 249, 246;
+  --accent-3-rgb: 254, 222, 93;
+  --muted-rgb: 132, 139, 189;
+  --error-rgb: 255, 126, 219;
+  --success-rgb: 54, 249, 246;
+  --warning-rgb: 254, 222, 93;
+  /* Semantic surface layers (rgb) — deep plum, not near-black */
+  --surface-1-rgb: 52, 41, 79;
+  --surface-2-rgb: 36, 27, 51;
+  --bg-deep-rgb: 26, 17, 38;
+  --active-text: #ffffff;
+  --shadow-rgb: 15, 5, 25;
+  --backdrop-rgb: 15, 5, 25;
+}
+
+:root[data-theme="solarizedDark"] {
+  --color-bg: #002b36;
+  --color-surface: rgba(var(--surface-1-rgb), 0.65);
+  --color-surface-solid: #073642;
+  --color-surface-hover: rgba(14, 68, 83, 0.75);
+  --color-surface-glass: linear-gradient(160deg, rgba(var(--surface-1-rgb), 0.8), rgba(var(--surface-2-rgb), 0.9));
+  /* Solarized Dark: the canonical Ethan Schoonover palette — base03 deep teal
+     bg, blue accent, with the measured, low-contrast syntax colors that made
+     Solarized the standard for long coding sessions. Deliberately calmer than
+     the neon themes; glows are subtle so the palette reads as designed. */
+  --color-accent: #268bd2;
+  --color-accent-secondary: #2aa198;
+  --color-accent-cyan: #b58900;
+  --color-accent-glow: rgba(var(--accent-rgb), 0.3);
+  --color-cyan-glow: rgba(var(--accent-3-rgb), 0.3);
+  --color-purple-glow: rgba(var(--accent-2-rgb), 0.3);
+  --color-text: #93a1a1;
+  --color-muted: #586e75;
+  --color-success: #859900;
+  --color-warning: #b58900;
+  --color-error: #dc322f;
+  --color-border: rgba(var(--muted-rgb), 0.35);
+  --color-border-accent: rgba(var(--accent-rgb), 0.4);
+  --color-selection: rgba(var(--accent-rgb), 0.25);
+  --glow-accent: 0 0 16px rgba(var(--accent-rgb), 0.2);
+  --glow-text: 0 0 8px rgba(var(--accent-rgb), 0.14);
+  /* Solarized spectrum: blue → cyan → yellow → orange → magenta (the 5 accents) */
+  --gradient-spectrum: linear-gradient(90deg, #268bd2 0%, #2aa198 25%, #b58900 50%, #cb4b16 75%, #d33682 100%);
+
+  /* RGB channels for rgba() tints */
+  --accent-rgb: 38, 139, 210;
+  --accent-2-rgb: 42, 161, 152;
+  --accent-3-rgb: 181, 137, 0;
+  --muted-rgb: 88, 110, 117;
+  --error-rgb: 220, 50, 47;
+  --success-rgb: 133, 153, 0;
+  --warning-rgb: 181, 137, 0;
+  /* Semantic surface layers (rgb) — base02/base03 teal */
+  --surface-1-rgb: 7, 54, 66;
+  --surface-2-rgb: 0, 43, 54;
+  --bg-deep-rgb: 0, 36, 46;
+  --active-text: #fdf6e3;
+  --shadow-rgb: 0, 20, 28;
+  --backdrop-rgb: 0, 20, 28;
+}
+
 /* Global Font: JetBrains Mono everywhere */
 *, *::before, *::after {
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;

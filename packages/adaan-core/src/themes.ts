@@ -85,11 +85,53 @@ export const THEMES: Record<ThemeId, ThemePalette> = {
       operator: "#7a8aa8",
     },
   },
+  synthwave84: {
+    id: "synthwave84",
+    name: "Synthwave '84",
+    base: {
+      bg: "#241b33",
+      surface: "#34294f",
+      accent: "#ff7edb",
+      text: "#fefefe",
+      muted: "#848bbd",
+    },
+    syntax: {
+      keyword: "#ff7edb",
+      string: "#fede5d",
+      comment: "#848bbd",
+      number: "#f92aad",
+      variable: "#fefefe",
+      function: "#36f9f6",
+      type: "#ff7edb",
+      operator: "#ff7edb",
+    },
+  },
+  solarizedDark: {
+    id: "solarizedDark",
+    name: "Solarized Dark",
+    base: {
+      bg: "#002b36",
+      surface: "#073642",
+      accent: "#268bd2",
+      text: "#93a1a1",
+      muted: "#586e75",
+    },
+    syntax: {
+      keyword: "#859900",
+      string: "#2aa198",
+      comment: "#586e75",
+      number: "#d33682",
+      variable: "#93a1a1",
+      function: "#268bd2",
+      type: "#b58900",
+      operator: "#859900",
+    },
+  },
 };
 
 export const DEFAULT_THEME: ThemeId = "retrowave";
 
-export const THEME_IDS: ThemeId[] = ["retrowave", "ghibli", "fiesta", "dawn"];
+export const THEME_IDS: ThemeId[] = ["retrowave", "ghibli", "fiesta", "dawn", "synthwave84", "solarizedDark"];
 
 export function getTheme(id: ThemeId): ThemePalette {
   return THEMES[id] ?? THEMES[DEFAULT_THEME];
