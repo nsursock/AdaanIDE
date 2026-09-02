@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { ModelInfo, LocalModelInfo } from "@adaan/core";
-  import { chatStore } from "@adaan/core";
+  import { chatStore, settingsStore, modelAliasKey } from "@adaan/core";
   import { IconChevronDown, IconCpu, IconCheck, IconSearch } from "@tabler/icons-svelte";
 
   let { models, onSelectLocal, onSelect } = $props<{
@@ -42,9 +42,23 @@
     return `${ctx}`;
   }
 
+  function isLocal(m: ModelInfo): m is LocalModelInfo {
+    return typeof (m as LocalModelInfo).providerId === "string";
+  }
+
+  /** Live alias for a model, read straight from settings so the picker
+   *  reacts the moment an alias is added or removed. Only local models have
+   *  user-defined aliases. */
+  function aliasOf(m: ModelInfo): string | undefined {
+    if (isLocal(m)) {
+      return settingsStore.settings.modelAliases[modelAliasKey(m.providerId, m.id)];
+    }
+    return m.alias;
+  }
+
   /** Display name — user-defined alias wins over the raw model name. */
   function displayName(m: ModelInfo): string {
-    return m.alias || m.name;
+    return aliasOf(m) || m.name;
   }
 
   function matches(m: ModelInfo): boolean {
@@ -59,7 +73,12 @@
 
   const filteredFree = $derived(models.free.filter(matches));
   const filteredPaid = $derived(models.paid.filter(matches));
-  const filteredLocal = $derived((models.local ?? []).filter(matches));
+  // Only local models the user has given an alias appear in the picker —
+  // reading the alias map inside the derivation makes the list react the
+  // instant an alias is set in Settings.
+  const filteredLocal = $derived(
+    (models.local ?? []).filter((m: LocalModelInfo) => Boolean(aliasOf(m)) && matches(m)),
+  );
 
   // Keep the search bar pinned, the group labels pinned just below it, and
   // fade the free label out (with a slide) the moment the paid label arrives

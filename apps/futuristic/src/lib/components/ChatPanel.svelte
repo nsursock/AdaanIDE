@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { chatStore, workspaceStore, settingsStore, modelAliasKey, type ModelInfo, type LocalModelInfo, type ChatMessageEntry } from "@adaan/core";
+  import { chatStore, workspaceStore, settingsStore, type ModelInfo, type LocalModelInfo, type ChatMessageEntry } from "@adaan/core";
   import { onMount } from "svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ModelPicker from "./ModelPicker.svelte";
@@ -61,16 +61,6 @@
         models = await res.json();
         // Ensure local array exists even if the server didn't send one
         if (models && !models.local) models.local = [];
-        // Apply user-defined display aliases (Settings → Models). Aliases
-        // live in client settings, so they're merged in here rather than
-        // served by the API.
-        if (models) {
-          const aliases = settingsStore.settings.modelAliases;
-          for (const m of models.local) {
-            const alias = aliases[modelAliasKey(m.providerId, m.id)];
-            if (alias) m.alias = alias;
-          }
-        }
         // Restore the user's last-selected model if it's still available;
         // otherwise fall back to the first free tools-capable model.
         if (models && !chatStore.restoreModel(models)) {
