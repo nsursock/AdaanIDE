@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ChatMessageEntry } from "@adaan/core";
+  import type { ChatMessageEntry, TimelineSegment } from "@adaan/core";
   import ToolCallCard from "./ToolCallCard.svelte";
   import { IconUser, IconBrain, IconCpu, IconSparkles, IconAlertTriangle, IconCreditCard, IconX, IconRoute, IconArrowUp, IconChevronDown, IconChevronRight, IconBulb } from "@tabler/icons-svelte";
 
@@ -13,10 +13,25 @@
     onDismissExhausted?: () => void;
   }>();
 
-  // Reasoning/thinking block — collapsible. Defaults to expanded while
-  // streaming (so the user sees live thoughts), collapses on turn end to
-  // keep the final answer front-and-center. Toggled manually thereafter.
-  let reasoningExpanded = $state(true);
+  // Per-segment collapse state for reasoning blocks in the timeline. Each
+  // reasoning segment is independently collapsible; defaults to expanded
+  // (so the user sees live thoughts during streaming). Keyed by timeline
+  // index so each block tracks its own state.
+  let collapsedReasoning = $state<Set<number>>(new Set());
+
+  function toggleReasoning(idx: number) {
+    const next = new Set(collapsedReasoning);
+    if (next.has(idx)) next.delete(idx);
+    else next.add(idx);
+    collapsedReasoning = next;
+  }
+
+  // Look up a tool call by ID from the flat toolCalls array — the timeline
+  // only stores a reference (toolCallId) so the live result/error/pending
+  // state on the tool-call object is always current.
+  function getToolCall(toolCallId: string) {
+    return msg.toolCalls?.find((t) => t.id === toolCallId);
+  }
 
   function fmtTokens(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -92,36 +107,51 @@
     </div>
   {/if}
 
-  <!-- Reasoning / thinking — rendered above the final answer in a muted,
-       collapsible block. Only reasoning-capable models (o1, DeepSeek-R1,
-       Claude w/ extended thinking) produce this; for others it's absent. -->
-  {#if msg.reasoning}
-    <div class="reasoning-block mb-2">
-      <button
-        type="button"
-        class="reasoning-header"
-        onclick={() => (reasoningExpanded = !reasoningExpanded)}
-        aria-expanded={reasoningExpanded}
-        aria-label="Toggle reasoning"
-      >
-        {#if reasoningExpanded}
-          <IconChevronDown size={11} class="flex-shrink-0" />
-        {:else}
-          <IconChevronRight size={11} class="flex-shrink-0" />
+  <!-- Chronological timeline — renders the real interleaved sequence of the
+       agent loop: thinking → commands → thinking → commands → feedback → …
+       Each reasoning segment is its own collapsible block; each tool call is
+       its own card; content segments are the final-answer text. Falls back
+       to flat content for user messages (no timeline). -->
+  {#if msg.timeline && msg.timeline.length > 0}
+    {#each msg.timeline as seg, idx (idx)}
+      {#if seg.type === "reasoning"}
+        <div class="reasoning-block mb-2">
+          <button
+            type="button"
+            class="reasoning-header"
+            onclick={() => toggleReasoning(idx)}
+            aria-expanded={!collapsedReasoning.has(idx)}
+            aria-label="Toggle reasoning"
+          >
+            {#if !collapsedReasoning.has(idx)}
+              <IconChevronDown size={11} class="flex-shrink-0" />
+            {:else}
+              <IconChevronRight size={11} class="flex-shrink-0" />
+            {/if}
+            <IconBulb size={11} class="flex-shrink-0" />
+            <span>Reasoning</span>
+          </button>
+          {#if !collapsedReasoning.has(idx)}
+            <div class="reasoning-body">
+              {seg.text}
+            </div>
+          {/if}
+        </div>
+      {:else if seg.type === "tool"}
+        {@const tc = getToolCall(seg.toolCallId)}
+        {#if tc}
+          <div class="mt-2.5">
+            <ToolCallCard toolCall={tc} />
+          </div>
         {/if}
-        <IconBulb size={11} class="flex-shrink-0" />
-        <span>Reasoning</span>
-      </button>
-      {#if reasoningExpanded}
-        <div class="reasoning-body">
-          {msg.reasoning}
+      {:else if seg.type === "content" && seg.text}
+        <div class="text-[0.8125rem] whitespace-pre-wrap break-words leading-relaxed font-mono opacity-95 mt-2">
+          {seg.text}
         </div>
       {/if}
-    </div>
-  {/if}
-
-  <!-- Content -->
-  {#if msg.content}
+    {/each}
+  {:else if msg.content}
+    <!-- Fallback for messages without a timeline (user messages, legacy) -->
     <div class="text-[0.8125rem] whitespace-pre-wrap break-words leading-relaxed font-mono opacity-95">
       {msg.content}
     </div>
@@ -134,15 +164,6 @@
     <div class="mt-1 flex items-center gap-1.5 text-[0.6875rem] font-mono text-[var(--color-accent)] opacity-80">
       <span class="status-pulse-dot"></span>
       <span class="truncate">{msg.status.message}</span>
-    </div>
-  {/if}
-
-  <!-- Tool calls -->
-  {#if msg.toolCalls && msg.toolCalls.length > 0}
-    <div class="mt-2.5 space-y-2">
-      {#each msg.toolCalls as tc (tc.id)}
-        <ToolCallCard toolCall={tc} />
-      {/each}
     </div>
   {/if}
 

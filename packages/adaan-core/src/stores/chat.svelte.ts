@@ -19,6 +19,14 @@ export interface ChatMessageEntry {
     approvalRequired?: boolean;
     cached?: boolean;
   }>;
+  /** Chronologically-ordered timeline of reasoning/tool/content segments,
+   *  capturing the real interleaved sequence of the agent loop (thinking →
+   *  commands → thinking → commands → feedback → …). Consecutive deltas of
+   *  the same kind are merged into a single segment. The UI renders from
+   *  this array instead of the flat `reasoning`/`toolCalls`/`content` buckets
+   *  so the user sees the actual flow of work, not a compartmentalized view.
+   *  The flat fields are kept for the transcript and other consumers. */
+  timeline?: TimelineSegment[];
   modelUsed?: string;
   timestamp: number;
   error?: string;
@@ -43,6 +51,17 @@ export interface ChatMessageEntry {
   /** Phase 3: set when the model was escalated mid-task due to repeated failures. */
   modelEscalations?: Array<{ from: string; to: string; reason: string }>;
 }
+
+/** A single segment in the chronological timeline of an assistant message.
+ *  Consecutive reasoning deltas are merged into one `reasoning` segment;
+ *  consecutive content deltas are merged into one `content` segment. Each
+ *  tool call is its own segment, referenced by `toolCallId` so the full
+ *  tool-call object (with live result/error/pending state) can be looked up
+ *  from `ChatMessageEntry.toolCalls` at render time. */
+export type TimelineSegment =
+  | { type: "reasoning"; text: string }
+  | { type: "tool"; toolCallId: string }
+  | { type: "content"; text: string };
 
 class ChatStore {
   messages = $state<ChatMessageEntry[]>([]);
@@ -109,6 +128,28 @@ class ChatStore {
   appendReasoningToAssistant(id: string, text: string) {
     const msg = this.messages.find((m) => m.id === id);
     if (msg) msg.reasoning = (msg.reasoning ?? "") + text;
+  }
+
+  /** Append a segment to the assistant message's chronological `timeline`
+   *  array. Consecutive `reasoning` or `content` deltas are merged into the
+   *  last segment of the same type (so a stream of reasoning tokens becomes
+   *  one block, not hundreds of one-token blocks). `tool` segments are never
+   *  merged — each tool call is its own entry, referenced by `toolCallId`. */
+  appendTimelineSegment(id: string, segment: TimelineSegment) {
+    const msg = this.messages.find((m) => m.id === id);
+    if (!msg) return;
+    if (!msg.timeline) msg.timeline = [];
+    const last = msg.timeline[msg.timeline.length - 1];
+    if (
+      segment.type !== "tool" &&
+      last &&
+      last.type === segment.type
+    ) {
+      // Merge consecutive reasoning/content deltas.
+      (last as { text: string }).text += segment.text;
+    } else {
+      msg.timeline.push(segment);
+    }
   }
 
   setAssistantModel(id: string, modelId: string) {
@@ -272,6 +313,7 @@ class ChatStore {
       case "text.delta": {
         const data = event.data as { text: string };
         this.appendToAssistant(assistantId, data.text);
+        this.appendTimelineSegment(assistantId, { type: "content", text: data.text });
         // First real token — clear the "waiting" status line.
         this.setAssistantStatus(assistantId, null);
         break;
@@ -279,6 +321,7 @@ class ChatStore {
       case "reasoning.delta": {
         const data = event.data as ReasoningDeltaData;
         this.appendReasoningToAssistant(assistantId, data.text);
+        this.appendTimelineSegment(assistantId, { type: "reasoning", text: data.text });
         // Reasoning is a genuine alive signal — clear the "waiting" status
         // line so the UI shows the thought block instead of "Working… Ns".
         this.setAssistantStatus(assistantId, null);
@@ -349,6 +392,7 @@ class ChatStore {
           args: {},
           pending: true,
         });
+        this.appendTimelineSegment(assistantId, { type: "tool", toolCallId: data.toolCallId });
         break;
       }
       case "tool.args": {
@@ -383,6 +427,7 @@ class ChatStore {
           pending: true,
           approvalRequired: true,
         });
+        this.appendTimelineSegment(assistantId, { type: "tool", toolCallId: data.toolCallId });
         break;
       }
       case "tool.cache_hit": {

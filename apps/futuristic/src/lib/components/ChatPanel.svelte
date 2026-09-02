@@ -29,6 +29,18 @@
   let messagesContainer: HTMLDivElement;
   let copied = $state(false);
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
+  // Stick-to-bottom: auto-scroll only when the user is already near the
+  // bottom of the chat. If they scrolled up to read something, we don't
+  // yank them back down on every incoming token. Reset to true when the
+  // user sends a new message (so their message + the reply stay visible).
+  let stickToBottom = $state(true);
+
+  function onMessagesScroll() {
+    if (!messagesContainer) return;
+    const distFromBottom =
+      messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight;
+    stickToBottom = distFromBottom < 80;
+  }
 
   const quickPrompts = [
     "Explain project structure",
@@ -132,6 +144,10 @@
    */
   async function sendMessage(message: string) {
     if (chatStore.streaming) return;
+    // The user just sent a message — force the chat to scroll to the bottom
+    // so their message and the incoming reply are visible, even if they had
+    // scrolled up to read earlier history.
+    stickToBottom = true;
     // A new turn supersedes any tool approval left over from a previous,
     // now-abandoned turn — the backend auto-denies those (see
     // AgentSession.resume()), so drop the matching UI state too instead of
@@ -386,9 +402,21 @@
     }
   }
 
+  // Auto-scroll to the latest content as it streams in. Reads deep into
+  // each message (content, reasoning, toolCalls, timeline) so Svelte's
+  // reactivity fires on every token/tool-call/reasoning delta, not just
+  // when a new message is added. Respects `stickToBottom` so a user who
+  // scrolled up to read isn't pulled back down.
   $effect(() => {
-    const _ = chatStore.messages.length;
-    if (messagesContainer) {
+    // Touch every reactive property that should trigger auto-scroll.
+    for (const m of chatStore.messages) {
+      void m.content;
+      void m.reasoning;
+      void m.toolCalls?.length;
+      void m.timeline?.length;
+      void m.status?.message;
+    }
+    if (messagesContainer && stickToBottom) {
       requestAnimationFrame(() => {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
       });
@@ -452,7 +480,7 @@
   {/if}
 
   <!-- Messages List -->
-  <div class="flex-1 overflow-y-auto px-3 py-3 space-y-3" bind:this={messagesContainer}>
+  <div class="flex-1 overflow-y-auto px-3 py-3 space-y-3" bind:this={messagesContainer} onscroll={onMessagesScroll}>
     {#if chatStore.messages.length === 0}
       <div class="editor-empty" style="height: auto; padding: 2.5rem 0.5rem;">
         <div class="reticle-ring" style="width:70px;height:70px;">

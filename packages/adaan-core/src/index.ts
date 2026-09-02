@@ -38,7 +38,7 @@ export type { DiffOpType, DiffLine, DiffStats } from "./diff.js";
 
 // Stores (client-safe)
 export { themeStore, workspaceStore, chatStore, settingsStore } from "./stores/index.js";
-export type { OpenTab, PatchSignal, PendingFileChange, ChatMessageEntry, Settings } from "./stores/index.js";
+export type { OpenTab, PatchSignal, PendingFileChange, ChatMessageEntry, TimelineSegment, Settings } from "./stores/index.js";
 export {
   SCHEMA_VERSION,
   STORAGE_KEY,
