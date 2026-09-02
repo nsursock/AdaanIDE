@@ -10,7 +10,7 @@
   <div class="px-3 py-1.5 border-b border-[var(--color-border)] flex items-center gap-2 bg-[rgba(var(--surface-1-rgb),0.5)]">
     <IconFileDiff size={14} class="text-[var(--color-accent)]" />
     <span class="font-bold text-[var(--color-text)] truncate">{path}</span>
-    <span class="ml-auto text-[0.625rem] px-1.5 py-0.2 rounded bg-[rgba(var(--success-rgb),0.15)] text-[var(--color-success)] border border-[rgba(var(--success-rgb),0.3)]">
+    <span class="ml-auto text-[0.6875rem] px-1.5 py-0.2 rounded bg-[rgba(var(--success-rgb),0.15)] text-[var(--color-success)] border border-[rgba(var(--success-rgb),0.3)]">
       DIFF VIEW
     </span>
   </div>

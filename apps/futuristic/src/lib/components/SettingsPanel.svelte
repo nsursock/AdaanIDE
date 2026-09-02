@@ -262,7 +262,7 @@
             </button>
           {/each}
         </div>
-        <div class="text-[0.625rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-2">
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-2">
           Click a color to copy its hex code.
         </div>
       </section>
@@ -338,7 +338,7 @@
             <button class="settings-link-btn" onclick={clearModel}>Clear</button>
           {/if}
         </div>
-        <div class="text-[0.625rem] text-[var(--color-muted)] opacity-70 leading-relaxed">
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed">
           The chosen model is remembered across reloads. If it becomes unavailable, the agent falls back to the first free tools-capable model.
         </div>
       </section>
@@ -379,7 +379,7 @@
               oninput={(e) => settingsStore.setRoutingThreshold(Number(e.currentTarget.value))}
             />
           </div>
-          <div class="text-[0.625rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
+          <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
             Minimum empirical task success rate required to trust a model. Lower = more aggressive routing to cheap models.
           </div>
 
@@ -453,7 +453,7 @@
             <span class="text-[0.6875rem] text-[var(--color-error)]">{keyError}</span>
           {/if}
         </div>
-        <div class="text-[0.625rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-2">
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-2">
           Stored locally in your browser and sent to the server on save. Falls back to the <code class="font-mono">OPENROUTER_API_KEY</code> env var when empty. Get a key at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener" class="text-[var(--color-accent)] underline">openrouter.ai/keys</a>.
         </div>
       </section>
@@ -596,7 +596,7 @@
     align-items: center;
     gap: 0.25rem;
     font-family: var(--font-mono, monospace);
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     color: var(--color-muted);
   }
 
@@ -617,7 +617,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     font-weight: 700;
     letter-spacing: 0.2em;
     text-transform: uppercase;

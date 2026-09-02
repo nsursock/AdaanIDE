@@ -357,7 +357,7 @@
     border-radius: 999px;
     background: rgba(var(--accent-rgb), 0.15);
     color: var(--color-accent);
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     font-weight: 700;
     margin-left: 0.3rem;
   }
@@ -387,7 +387,7 @@
 
   .history-empty {
     padding: 0.5rem 0;
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     color: var(--color-muted);
     opacity: 0.6;
     text-align: center;
@@ -432,14 +432,14 @@
   }
 
   .history-entry-source {
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.03em;
   }
 
   .history-entry-label {
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     color: var(--color-muted);
     opacity: 0.7;
     font-family: "JetBrains Mono", monospace;
@@ -455,7 +455,7 @@
     border: 1px solid rgba(var(--muted-rgb), 0.2);
     background: rgba(var(--muted-rgb), 0.05);
     color: var(--color-muted);
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.15s ease;
@@ -478,7 +478,7 @@
   }
 
   .history-entry-time {
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
     color: var(--color-muted);
     opacity: 0.6;
     font-family: "JetBrains Mono", monospace;
@@ -487,7 +487,7 @@
   .history-entry-stats {
     display: inline-flex;
     gap: 0.25rem;
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
     font-weight: 700;
   }
   .hs-add { color: rgb(120, 220, 150); }
@@ -506,7 +506,7 @@
   }
 
   .git-hash {
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
     font-family: "JetBrains Mono", monospace;
     color: rgb(240, 170, 90);
     font-weight: 700;
@@ -514,7 +514,7 @@
   }
 
   .git-repo {
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
     font-family: "JetBrains Mono", monospace;
     color: var(--color-muted);
     background: rgba(var(--muted-rgb), 0.1);
@@ -525,7 +525,7 @@
   }
 
   .git-message {
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     color: var(--color-text);
     opacity: 0.75;
     overflow: hidden;
@@ -536,7 +536,7 @@
   }
 
   .git-author {
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
     color: var(--color-muted);
     opacity: 0.7;
     font-family: "JetBrains Mono", monospace;

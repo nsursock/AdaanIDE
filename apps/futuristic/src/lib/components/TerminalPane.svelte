@@ -401,7 +401,7 @@
   }
 
   .terminal-mode-tag {
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
     letter-spacing: 0.1em;
     text-transform: uppercase;
     padding: 0.05rem 0.35rem;
@@ -415,7 +415,7 @@
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: var(--color-accent);
@@ -490,7 +490,7 @@
   .term-out { color: var(--color-text); opacity: 0.92; }
   .term-err { color: var(--color-error); }
   .term-exit {
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     color: var(--color-muted);
     padding-left: 0.1rem;
     margin-bottom: 0.15rem;

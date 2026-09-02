@@ -181,7 +181,7 @@
 
       <div class="flex items-center gap-1.5 select-none">
         <span class="brand-mark text-base font-black">AdaanIDE</span>
-        <span class="text-[0.625rem] px-1.5 py-0.5 rounded border border-[var(--color-border)] opacity-75 font-semibold text-[var(--color-accent)]">
+        <span class="text-[0.6875rem] px-1.5 py-0.5 rounded border border-[var(--color-border)] opacity-75 font-semibold text-[var(--color-accent)]">
           ⟨ v1.0 ⟩
         </span>
       </div>

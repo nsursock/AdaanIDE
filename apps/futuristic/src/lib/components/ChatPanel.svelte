@@ -409,7 +409,7 @@
 
     <div class="flex items-center gap-1.5">
       <!-- Live Status Pill -->
-      <span class="status-chip text-[0.625rem] py-0.5 px-2 hidden sm:inline-flex">
+      <span class="status-chip text-[0.6875rem] py-0.5 px-2 hidden sm:inline-flex">
         {#if chatStore.streaming}
           <span class="dot bg-[var(--color-accent)] shadow-[0_0_8px_var(--color-accent)] animate-ping"></span>
           <span class="text-[var(--color-accent)]">Streaming</span>
@@ -499,7 +499,7 @@
   <!-- Command Console Input Area -->
   <div class="p-2.5 border-t border-[var(--color-border)] bg-[rgba(var(--bg-deep-rgb),0.6)]">
     <div class="chat-console-box p-1.5">
-      <div class="flex items-center gap-1.5 px-2 pt-1 pb-0.5 text-[0.625rem] font-bold tracking-wider text-[var(--color-muted)] uppercase select-none opacity-75">
+      <div class="flex items-center gap-1.5 px-2 pt-1 pb-0.5 text-[0.6875rem] font-bold tracking-wider text-[var(--color-muted)] uppercase select-none opacity-75">
         <IconTerminal2 size={12} class="text-[var(--color-accent)]" />
         <span>Prompt Console</span>
         {#if chatStore.streaming}
@@ -548,7 +548,7 @@
       </div>
     </div>
 
-    <div class="flex justify-between items-center px-1.5 pt-1.5 text-[0.625rem] text-[var(--color-muted)] opacity-60">
+    <div class="flex justify-between items-center px-1.5 pt-1.5 text-[0.6875rem] text-[var(--color-muted)] opacity-60">
       {#if chatStore.streaming}
         <span>ENTER to interrupt</span>
         <span>SHIFT+ENTER for new line</span>

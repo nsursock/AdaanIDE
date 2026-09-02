@@ -60,13 +60,13 @@
        a transient failure, so the reply came from a different model. Shows
        the full cascade chain so the user sees every hop. -->
   {#if msg.routedTo}
-    <div class="mb-2 flex items-center gap-1.5 text-[0.625rem] font-mono text-[var(--color-accent)] opacity-80">
+    <div class="mb-2 flex items-center gap-1.5 text-[0.6875rem] font-mono text-[var(--color-accent)] opacity-80">
       <IconRoute size={11} class="flex-shrink-0" />
       <span>auto → {msg.routedTo.model.split("/").pop()} · {msg.routedTo.category}</span>
     </div>
   {/if}
   {#if msg.modelEscalations && msg.modelEscalations.length > 0}
-    <div class="mb-2 flex items-center gap-1.5 text-[0.625rem] font-mono text-[var(--color-warning)] opacity-80">
+    <div class="mb-2 flex items-center gap-1.5 text-[0.6875rem] font-mono text-[var(--color-warning)] opacity-80">
       <IconArrowUp size={11} class="flex-shrink-0" />
       {#each msg.modelEscalations as esc, i}
         <span>{i > 0 ? " · " : ""}{esc.from.split("/").pop()} → {esc.to.split("/").pop()}</span>
@@ -82,7 +82,7 @@
           Model fell back: {msg.modelFallback[0].from} → {msg.modelFallback[msg.modelFallback.length - 1].to}
         </div>
         {#if msg.modelFallback.length > 1}
-          <div class="opacity-70 text-[0.625rem]">
+          <div class="opacity-70 text-[0.6875rem]">
             {#each msg.modelFallback as hop, i}
               <span>{i > 0 ? ' → ' : ''}{hop.to}</span>
             {/each}
@@ -176,7 +176,7 @@
 
   <!-- Per-task cost/token footer -->
   {#if msg.taskSummary}
-    <div class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.625rem] font-mono text-[var(--color-muted)] opacity-80 border-t border-[rgba(var(--border-rgb),0.25)] pt-1.5">
+    <div class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.6875rem] font-mono text-[var(--color-muted)] opacity-80 border-t border-[rgba(var(--border-rgb),0.25)] pt-1.5">
       <span class="task-footer-status status-{msg.taskSummary.status}">
         {msg.taskSummary.status}
       </span>
@@ -220,7 +220,7 @@
     gap: 0.3rem;
     width: 100%;
     padding: 0.3rem 0.55rem;
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -263,7 +263,7 @@
     letter-spacing: 0.05em;
     padding: 0 0.3rem;
     border-radius: 3px;
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
   }
   .task-footer-status.status-success {
     color: var(--color-success, #4ade80);

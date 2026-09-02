@@ -131,7 +131,7 @@
       <span class="pane-title-bar"></span>
       <span class="kicker-tag">01 //</span>
       <span>Explorer</span>
-      <span class="text-[0.625rem] px-1.5 py-0.2 rounded bg-[rgba(var(--accent-rgb),0.12)] text-[var(--color-accent)] font-mono border border-[rgba(var(--accent-rgb),0.25)]">
+      <span class="text-[0.6875rem] px-1.5 py-0.2 rounded bg-[rgba(var(--accent-rgb),0.12)] text-[var(--color-accent)] font-mono border border-[rgba(var(--accent-rgb),0.25)]">
         {totalFiles}
       </span>
     </div>

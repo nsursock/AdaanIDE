@@ -166,7 +166,7 @@
       ".cm-content": {
         caretColor: "var(--color-accent)",
         fontFamily: '"JetBrains Mono", monospace',
-        fontSize: "13px",
+        fontSize: "14px",
         lineHeight: "1.6",
         padding: "8px 0",
       },
@@ -383,12 +383,12 @@
 
       <div class="flex items-center gap-3 flex-shrink-0 pl-2">
         {#if workspaceStore.activeTab.dirty}
-          <span class="inline-flex items-center gap-1 text-[var(--color-warning)] text-[0.625rem] font-bold tracking-wider uppercase">
+          <span class="inline-flex items-center gap-1 text-[var(--color-warning)] text-[0.6875rem] font-bold tracking-wider uppercase">
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-[var(--color-warning)] shadow-[0_0_6px_var(--color-warning)] animate-pulse"></span>
             Modified [⌘S]
           </span>
         {:else}
-          <span class="inline-flex items-center gap-1 text-[var(--color-success)] text-[0.625rem] font-medium tracking-wider uppercase opacity-80">
+          <span class="inline-flex items-center gap-1 text-[var(--color-success)] text-[0.6875rem] font-medium tracking-wider uppercase opacity-80">
             <IconCheck size={12} />
             Synced
           </span>
@@ -483,7 +483,7 @@
     <!-- Futuristic Status Bar -->
     <div class="editor-status-bar">
       <div class="flex items-center gap-3">
-        <span class="px-1.5 py-0.2 rounded bg-[rgba(var(--accent-rgb),0.1)] text-[var(--color-accent)] font-bold tracking-wider text-[0.625rem] border border-[rgba(var(--accent-rgb),0.25)]">
+        <span class="px-1.5 py-0.2 rounded bg-[rgba(var(--accent-rgb),0.1)] text-[var(--color-accent)] font-bold tracking-wider text-[0.6875rem] border border-[rgba(var(--accent-rgb),0.25)]">
           {getLangName(workspaceStore.activeTab.path)}
         </span>
         <span class="opacity-75">UTF-8</span>

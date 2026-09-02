@@ -167,7 +167,7 @@
       <div class="empty-state">
         <IconActivity size={28} class="opacity-40 mb-2" />
         <div>No telemetry yet.</div>
-        <div class="text-[0.625rem] opacity-60 mt-1">Send a message to the agent to start collecting metrics.</div>
+        <div class="text-[0.6875rem] opacity-60 mt-1">Send a message to the agent to start collecting metrics.</div>
       </div>
     {:else}
       {@const t = summary.today}
@@ -511,7 +511,7 @@
     color: var(--color-text);
   }
   .ext-badge {
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     font-weight: 700;
     padding: 0.05rem 0.3rem;
     border-radius: 3px;
@@ -646,7 +646,7 @@
     margin-top: 0.15rem;
   }
   .stat-sub {
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     color: var(--color-muted);
     opacity: 0.7;
     margin-top: 0.2rem;
@@ -678,7 +678,7 @@
     color: var(--color-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
   }
   .model-name {
     overflow: hidden;
@@ -717,7 +717,7 @@
     min-height: 2px;
   }
   .trend-day {
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
     color: var(--color-muted);
     opacity: 0.5;
     margin-top: 0.15rem;
@@ -780,7 +780,7 @@
     flex-direction: column;
     gap: 0.15rem;
     font-family: var(--font-mono, monospace);
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
   }
   .cap-header-row,
   .cap-row {
@@ -794,7 +794,7 @@
     color: var(--color-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
   }
   .cap-cat-label {
     color: var(--color-text);
@@ -835,7 +835,7 @@
     flex-direction: column;
     gap: 0.15rem;
     font-family: var(--font-mono, monospace);
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
   }
   .registry-row {
     display: grid;
@@ -849,7 +849,7 @@
     background: rgba(var(--accent-rgb), 0.06);
   }
   .registry-tier {
-    font-size: 0.5rem;
+    font-size: 0.6875rem;
     font-weight: 700;
     text-transform: uppercase;
     padding: 0.05rem 0.25rem;
@@ -896,7 +896,7 @@
     border: 1px solid rgba(248, 113, 113, 0.25);
     color: var(--color-error, #f87171);
     font-family: var(--font-mono, monospace);
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
   }
   .drift-severity {
     margin-left: auto;
@@ -906,7 +906,7 @@
     margin-top: 0.5rem;
   }
   .learn-title {
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
     color: var(--color-muted);
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -918,7 +918,7 @@
     gap: 0.4rem;
     padding: 0.15rem 0.3rem;
     font-family: var(--font-mono, monospace);
-    font-size: 0.625rem;
+    font-size: 0.6875rem;
     align-items: center;
   }
   .learn-cat {
@@ -937,6 +937,6 @@
   }
   .learn-samples {
     color: var(--color-muted);
-    font-size: 0.5625rem;
+    font-size: 0.6875rem;
   }
 </style>

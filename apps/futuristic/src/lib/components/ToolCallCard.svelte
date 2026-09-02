@@ -114,7 +114,7 @@
     <Icon size={14} class="text-[var(--color-accent)] flex-shrink-0" />
     <span class="font-bold truncate text-[var(--color-text)]">{toolCall.name}</span>
     {#if !expanded && stdoutPreview}
-      <span class="truncate opacity-50 text-[0.625rem] flex-1 min-w-0">{stdoutPreview}</span>
+      <span class="truncate opacity-50 text-[0.6875rem] flex-1 min-w-0">{stdoutPreview}</span>
     {/if}
 
     {#if toolCall.cached}
@@ -174,7 +174,7 @@
     <div class="tool-body">
       <!-- Args -->
       <div class="mb-2">
-        <div class="flex items-center gap-1.5 opacity-70 text-[0.625rem] font-bold uppercase tracking-wider text-[var(--color-muted)] mb-1">
+        <div class="flex items-center gap-1.5 opacity-70 text-[0.6875rem] font-bold uppercase tracking-wider text-[var(--color-muted)] mb-1">
           <span>Parameters</span>
         </div>
         <pre>{JSON.stringify(toolCall.args, null, 2)}</pre>
@@ -184,7 +184,7 @@
       {#if toolCall.result !== undefined}
         <div class="mb-2">
           {#if shell}
-            <div class="flex items-center gap-1.5 opacity-70 text-[0.625rem] font-bold uppercase tracking-wider {shell.timedOut ? 'text-[var(--color-warning)]' : 'text-[var(--color-success)]'} mb-1">
+            <div class="flex items-center gap-1.5 opacity-70 text-[0.6875rem] font-bold uppercase tracking-wider {shell.timedOut ? 'text-[var(--color-warning)]' : 'text-[var(--color-success)]'} mb-1">
               <span>stdout{shell.timedOut ? " · timed out" : shell.exitCode !== undefined ? ` · exit ${shell.exitCode}` : ""}</span>
             </div>
             {#if (shell.stdout ?? "").trim()}
@@ -193,13 +193,13 @@
               <pre class="opacity-50">(no stdout)</pre>
             {/if}
             {#if (shell.stderr ?? "").trim()}
-              <div class="flex items-center gap-1.5 text-[0.625rem] font-bold uppercase tracking-wider text-[var(--color-error)] mt-2 mb-1">
+              <div class="flex items-center gap-1.5 text-[0.6875rem] font-bold uppercase tracking-wider text-[var(--color-error)] mt-2 mb-1">
                 <span>stderr</span>
               </div>
               <pre class="tool-stderr max-h-40 overflow-y-auto">{shell.stderr}</pre>
             {/if}
           {:else}
-            <div class="flex items-center gap-1.5 opacity-70 text-[0.625rem] font-bold uppercase tracking-wider text-[var(--color-success)] mb-1">
+            <div class="flex items-center gap-1.5 opacity-70 text-[0.6875rem] font-bold uppercase tracking-wider text-[var(--color-success)] mb-1">
               <span>Result Payload</span>
             </div>
             <pre class="max-h-56 overflow-y-auto">{JSON.stringify(toolCall.result, null, 2)}</pre>
@@ -210,7 +210,7 @@
       <!-- Error -->
       {#if toolCall.error}
         <div class="mb-1">
-          <div class="flex items-center gap-1.5 text-[0.625rem] font-bold uppercase tracking-wider text-[var(--color-error)] mb-1">
+          <div class="flex items-center gap-1.5 text-[0.6875rem] font-bold uppercase tracking-wider text-[var(--color-error)] mb-1">
             <span>Execution Error</span>
           </div>
           <pre class="text-[var(--color-error)] border-[rgba(255,85,85,0.4)] bg-[rgba(255,85,85,0.08)]">{toolCall.error}</pre>

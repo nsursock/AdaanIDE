@@ -80,12 +80,12 @@
       {#if chatStore.selectedModel}
         <span class="truncate font-semibold text-xs">{chatStore.selectedModel.name}</span>
         {#if chatStore.selectedModel.contextLength}
-          <span class="text-[0.625rem] px-1 py-0.2 rounded bg-[rgba(var(--accent-rgb),0.12)] text-[var(--color-accent)] font-mono border border-[rgba(var(--accent-rgb),0.25)] flex-shrink-0">
+          <span class="text-[0.6875rem] px-1 py-0.2 rounded bg-[rgba(var(--accent-rgb),0.12)] text-[var(--color-accent)] font-mono border border-[rgba(var(--accent-rgb),0.25)] flex-shrink-0">
             {formatCtx(chatStore.selectedModel.contextLength)}
           </span>
         {/if}
         {#if !chatStore.selectedModel.toolsCapable}
-          <span class="text-[0.625rem] text-[var(--color-warning)] opacity-80 flex-shrink-0">(chat)</span>
+          <span class="text-[0.6875rem] text-[var(--color-warning)] opacity-80 flex-shrink-0">(chat)</span>
         {/if}
       {:else}
         <span class="opacity-50 text-xs">Select model…</span>
@@ -114,7 +114,7 @@
       {#if filteredFree.length > 0}
         <div class="group-label free-label {freeBarGone ? 'gone' : ''}" bind:this={freeLabelEl}>
           <span>⟨ Free Tier Models ⟩</span>
-          <span class="text-[0.5625rem] font-bold text-[var(--color-success)]">AUTOROTATION</span>
+          <span class="text-[0.6875rem] font-bold text-[var(--color-success)]">AUTOROTATION</span>
         </div>
         {#each filteredFree as model (model.id)}
           {@const isSelected = chatStore.selectedModel?.id === model.id}
@@ -133,7 +133,7 @@
             </div>
             <div class="flex items-center gap-1.5 flex-shrink-0">
               {#if model.contextLength}
-                <span class="text-[0.5625rem] text-[var(--color-muted)] font-mono">{formatCtx(model.contextLength)}</span>
+                <span class="text-[0.6875rem] text-[var(--color-muted)] font-mono">{formatCtx(model.contextLength)}</span>
               {/if}
               {#if model.toolsCapable}
                 <span class="tool-badge tools">FSM tools</span>
@@ -164,7 +164,7 @@
             </div>
             <div class="flex items-center gap-1.5 flex-shrink-0">
               {#if model.contextLength}
-                <span class="text-[0.5625rem] text-[var(--color-muted)] font-mono">{formatCtx(model.contextLength)}</span>
+                <span class="text-[0.6875rem] text-[var(--color-muted)] font-mono">{formatCtx(model.contextLength)}</span>
               {/if}
               {#if model.toolsCapable}
                 <span class="tool-badge tools">FSM tools</span>

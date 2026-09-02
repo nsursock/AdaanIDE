@@ -24,7 +24,7 @@
     <!-- Click-away backdrop -->
     <div class="fixed inset-0 z-40" onclick={() => open = false} onkeydown={(e) => e.key === "Escape" && (open = false)} role="button" tabindex="-1" aria-label="Close menu"></div>
     <div class="theme-menu absolute right-0 top-full mt-1.5 z-50 shadow-2xl">
-      <div class="px-3 py-1.5 text-[0.625rem] font-bold tracking-widest text-[var(--color-muted)] uppercase border-b border-[var(--color-border)] bg-[rgba(var(--accent-rgb),0.06)]">
+      <div class="px-3 py-1.5 text-[0.6875rem] font-bold tracking-widest text-[var(--color-muted)] uppercase border-b border-[var(--color-border)] bg-[rgba(var(--accent-rgb),0.06)]">
         ⟨ Palette Engine ⟩
       </div>
       {#each THEME_IDS as id (id)}

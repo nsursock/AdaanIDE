@@ -191,7 +191,7 @@ html, body {
   background: var(--color-bg);
   color: var(--color-text);
   font-family: "JetBrains Mono", monospace !important;
-  font-size: 13.5px;
+  font-size: 15px;
   line-height: 1.5;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
@@ -234,7 +234,7 @@ html, body {
 .cm-lineNumbers .cm-gutterElement {
   padding: 0 8px 0 4px !important;
   min-width: 38px;
-  font-size: 12px;
+  font-size: 13px;
   opacity: 0.6;
 }
 .cm-activeLineGutter {
@@ -277,7 +277,7 @@ html, body {
   text-decoration: line-through;
   text-decoration-color: rgba(255, 85, 85, 0.5);
   font-family: "JetBrains Mono", monospace;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
   padding: 0 8px;
   white-space: pre-wrap;
@@ -315,7 +315,7 @@ html, body {
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
   font-weight: 700;
-  font-size: 0.625rem;
+  font-size: 0.6875rem;
   letter-spacing: 0.02em;
 }
 .diff-badge.add    { background: rgba(80, 200, 120, 0.15); color: rgb(120, 220, 150); }
@@ -980,7 +980,7 @@ html, body {
 }
 .pane-title .kicker-tag {
   color: var(--color-accent);
-  font-size: 0.625rem;
+  font-size: 0.6875rem;
   letter-spacing: 0.15em;
   opacity: 0.85;
 }
@@ -1116,7 +1116,7 @@ html, body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.5625rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   padding: 0.05rem 0.25rem;
   border-radius: 3px;
@@ -1313,7 +1313,7 @@ html, body {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  font-size: 0.625rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.2em;
   text-transform: uppercase;
@@ -1327,7 +1327,7 @@ html, body {
 .msg-card.user .msg-role { color: var(--color-accent); }
 .msg-card.user .msg-role .msg-role-bar { background: var(--color-accent); }
 .msg-card .msg-model {
-  font-size: 0.625rem;
+  font-size: 0.6875rem;
   padding: 0.1rem 0.45rem;
   border-radius: 4px;
   background: rgba(var(--accent-rgb), 0.15);
@@ -1496,7 +1496,7 @@ html, body {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-  font-size: 0.625rem;
+  font-size: 0.6875rem;
   padding: 0.08rem 0.4rem;
   border-radius: 4px;
   font-family: "JetBrains Mono", monospace;
@@ -1567,7 +1567,7 @@ html, body {
 }
 .model-picker-menu .group-label {
   padding: 0.4rem 0.75rem;
-  font-size: 0.625rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   letter-spacing: 0.2em;
   text-transform: uppercase;
@@ -1637,7 +1637,7 @@ html, body {
 }
 .model-picker-menu .model-search input::placeholder { color: var(--color-muted); opacity: 0.7; }
 .model-picker-menu .model-search-count {
-  font-size: 0.5625rem;
+  font-size: 0.6875rem;
   font-family: "JetBrains Mono", monospace;
   color: var(--color-muted);
   flex-shrink: 0;

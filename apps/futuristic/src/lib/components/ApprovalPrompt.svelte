@@ -24,7 +24,7 @@
   </div>
 
   <div class="mb-3">
-    <div class="text-[0.625rem] text-[var(--color-muted)] font-bold tracking-wider uppercase mb-1">
+    <div class="text-[0.6875rem] text-[var(--color-muted)] font-bold tracking-wider uppercase mb-1">
       Payload Parameters
     </div>
     <pre class="text-xs p-2.5 rounded-lg bg-[rgba(var(--bg-deep-rgb),0.75)] border border-[var(--color-border)] font-mono text-[var(--color-text)] max-h-40 overflow-y-auto">{JSON.stringify(args, null, 2)}</pre>
