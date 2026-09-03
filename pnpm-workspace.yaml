@@ -2,4 +2,5 @@ packages:
   - "packages/*"
   - "apps/*"
 allowBuilds:
+  electron: true
   esbuild: true

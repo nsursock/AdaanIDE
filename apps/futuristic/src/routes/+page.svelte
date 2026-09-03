@@ -167,6 +167,49 @@
       if (tab) tab.hash = data.hash;
     }
   }
+
+  // --- Electron desktop integration ---------------------------------------
+  // When running inside the Electron wrapper, native menu accelerators
+  // (Cmd/Ctrl+S, Cmd/Ctrl+O) arrive as IPC events on window.adaan.
+  // In a plain browser these are no-ops (window.adaan is undefined).
+  $effect(() => {
+    const api = window.adaan;
+    if (!api) return;
+
+    // File → Save (Cmd/Ctrl+S from native menu)
+    const unsave = api.onSave(() => {
+      const tab = workspaceStore.activeTab;
+      if (tab && tab.dirty) {
+        saveFile(tab.path, tab.content, tab.hash);
+      }
+    });
+
+    // File → Open Workspace (Cmd/Ctrl+O from native menu)
+    const unopen = api.onOpenWorkspace(() => {
+      api.openWorkspaceDialog().then((p) => {
+        if (p) openWorkspace(p);
+      });
+    });
+
+    // Workspace path from native open dialog (triggered by main process)
+    const unws = api.onWorkspaceOpened((p) => {
+      openWorkspace(p);
+    });
+
+    // File → New File (Cmd/Ctrl+N from native menu)
+    const unnew = api.onNewFile(() => {
+      // Dispatch a custom event the FileTree can listen for, or just
+      // focus the editor for now — full new-file flow is handled in-app.
+      window.dispatchEvent(new CustomEvent("adaan:new-file"));
+    });
+
+    return () => {
+      unsave();
+      unopen();
+      unws();
+      unnew();
+    };
+  });
 </script>
 
 {#if !workspaceRoot}

@@ -31,6 +31,13 @@
   let creating = $state(false);
 
   let hasExisting = $derived(candidates.length > 0 || recent.length > 0);
+  const isDesktop = typeof window !== "undefined" && !!window.adaan;
+
+  async function nativeBrowse() {
+    if (!window.adaan) return;
+    const path = await window.adaan.openWorkspaceDialog();
+    if (path) openPath(path);
+  }
 
   // Typewriter tagline
   const tagline = "Code at the speed of thought.";
@@ -308,16 +315,28 @@
             <label for="manual-path" class="block text-xs font-semibold mb-2 tracking-wider uppercase" style="color: var(--color-muted);">
               Or enter path
             </label>
-            <div class="relative">
-              <span class="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-sm" style="color: var(--color-accent);">$</span>
-              <input
-                id="manual-path"
-                type="text"
-                bind:value={manualPath}
-                placeholder="/path/to/your/project"
-                class="console-input"
-                onkeydown={(e) => e.key === "Enter" && handleOpen()}
-              />
+            <div class="flex gap-2">
+              <div class="relative flex-1">
+                <span class="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-sm" style="color: var(--color-accent);">$</span>
+                <input
+                  id="manual-path"
+                  type="text"
+                  bind:value={manualPath}
+                  placeholder="/path/to/your/project"
+                  class="console-input"
+                  onkeydown={(e) => e.key === "Enter" && handleOpen()}
+                />
+              </div>
+              {#if isDesktop}
+                <button
+                  class="px-3 py-2 rounded-lg text-xs font-semibold tracking-wider uppercase whitespace-nowrap transition-all"
+                  style="background: rgba(var(--accent-rgb), 0.12); border: 1px solid rgba(var(--accent-rgb), 0.3); color: var(--color-accent);"
+                  onclick={nativeBrowse}
+                  title="Open native file dialog"
+                >
+                  <IconFolder size={14} class="inline" /> Browse
+                </button>
+              {/if}
             </div>
           </div>
 

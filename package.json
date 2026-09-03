@@ -8,7 +8,12 @@
     "build": "pnpm -r run build",
     "check": "pnpm -r run check",
     "test": "pnpm --filter @adaan/core test",
-    "build:core": "pnpm --filter @adaan/core build"
+    "build:core": "pnpm --filter @adaan/core build",
+    "desktop:dev": "pnpm --filter @adaan/desktop dev",
+    "desktop:build": "pnpm --filter @adaan/desktop build",
+    "desktop:build:mac": "pnpm --filter @adaan/desktop build:mac",
+    "desktop:build:win": "pnpm --filter @adaan/desktop build:win",
+    "desktop:build:linux": "pnpm --filter @adaan/desktop build:linux"
   },
   "devDependencies": {
     "typescript": "^5.7.0"

@@ -7,17 +7,36 @@ A coding IDE with file browser, code editor, and agentic chat. Built as a pnpm m
 ```
 adaan-core/      # Shared non-UI logic (agent engine, workspace, tools, OpenRouter provider)
 apps/futuristic/ # Futuristic UI (GSAP + Three.js, glassmorphism, port 5174)
+apps/desktop/    # Electron wrapper — desktop app (macOS/Windows/Linux)
 ```
 
 ## Commands
 
 ```bash
 pnpm install                          # Install all deps
-pnpm dev                              # Dev futuristic app (port 5174)
+pnpm dev                              # Dev futuristic app in browser (port 5174)
+pnpm desktop:dev                      # Dev as desktop app (Electron + vite dev server)
+pnpm desktop:build                    # Build desktop installer (.dmg/.exe/.AppImage)
+pnpm desktop:build:mac                # Build macOS only (.dmg + .zip)
+pnpm desktop:build:win                # Build Windows only (.exe + portable)
+pnpm desktop:build:linux              # Build Linux only (.AppImage + .deb)
 pnpm --filter @adaan/core test        # Run core tests (372 tests)
-pnpm --filter @adaan/futuristic build # Build futuristic app
+pnpm --filter @adaan/futuristic build # Build futuristic app (adapter-node)
 pnpm --filter @adaan/futuristic dev   # Dev futuristic (port 5174)
 ```
+
+## Desktop App (Electron)
+
+The `apps/desktop/` package wraps the SvelteKit futuristic app as a native desktop application. Key design:
+
+- **adapter-node**: The futuristic app uses `@sveltejs/adapter-node` (not adapter-auto) so the SvelteKit server (37+ API routes, SSE streams, file ops) runs as a Node.js process inside Electron.
+- **Main process** (`src/main.ts`): In production, spawns the built SvelteKit Node server on a random localhost port, waits for it to be ready, then loads it in a `BrowserWindow`. In dev, connects to the already-running vite dev server on port 5174.
+- **Preload** (`src/preload.ts`): Exposes a safe `window.adaan` API via `contextBridge` — native file dialogs (`openWorkspaceDialog`, `openFileDialog`, `saveFileDialog`), menu event listeners (`onSave`, `onOpenWorkspace`, `onNewFile`, `onWorkspaceOpened`), and platform info. `contextIsolation: true`, `nodeIntegration: false`.
+- **Native menus**: File menu with `CmdOrCtrl+S` (Save), `CmdOrCtrl+O` (Open Workspace), `CmdOrCtrl+N` (New File). Save triggers `window.adaan.onSave` → the SvelteKit app calls `saveFile()` on the active dirty tab. Open Workspace uses the native OS directory dialog.
+- **Single instance lock**: Only one AdaanIDE window can run at a time.
+- **Lifecycle**: Server process is killed on `before-quit`; on macOS the app stays alive with no windows (standard behavior).
+- **Packaging**: `electron-builder` produces `.dmg`/`.zip` (mac), `.exe`/portable (win), `.AppImage`/`.deb` (linux). The SvelteKit build output is bundled as `extraResources/server`. Output goes to `apps/desktop/release/`.
+- **Browser fallback**: The app works in any browser without Electron — `window.adaan` is simply `undefined`, and the `$effect` that wires native menu events is a no-op. The CodeMirror `Mod-s` keymap handles save in both browser and desktop contexts.
 
 ## Environment
 

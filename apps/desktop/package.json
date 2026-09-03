@@ -1,0 +1,25 @@
+{
+  "name": "@adaan/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AdaanIDE desktop app (Electron wrapper around the SvelteKit futuristic app)",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "concurrently -n server,electron -c blue,magenta \"pnpm --filter @adaan/futuristic dev\" \"wait-on tcp:5174 && tsc && bash scripts/launch.sh\"",
+    "dev:electron": "tsc && bash scripts/launch.sh",
+    "build:web": "pnpm --filter @adaan/futuristic build",
+    "build": "pnpm run build:web && tsc && electron-builder",
+    "build:mac": "pnpm run build:web && tsc && electron-builder --mac",
+    "build:win": "pnpm run build:web && tsc && electron-builder --win",
+    "build:linux": "pnpm run build:web && tsc && electron-builder --linux",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "concurrently": "^9.1.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.0",
+    "typescript": "^5.7.0",
+    "wait-on": "^8.0.0"
+  }
+}

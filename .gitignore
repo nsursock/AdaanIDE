@@ -11,3 +11,8 @@ test-results
 playwright-report
 /test-results
 .adaan
+
+# Electron / desktop app build artifacts
+apps/desktop/dist
+apps/desktop/release
+

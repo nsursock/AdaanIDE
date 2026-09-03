@@ -1,0 +1,53 @@
+appId: ai.adaan.ide
+productName: AdaanIDE
+copyright: Copyright © 2025 Adaan
+
+directories:
+  output: release
+  buildResources: build
+
+# The SvelteKit Node server (adapter-node output) is bundled as extraResource
+# so the Electron main process can spawn it at runtime.
+extraResources:
+  - from: ../futuristic/build
+    to: server
+    filter: ["**/*"]
+
+# Electron main + preload (compiled from src/ by tsc)
+files:
+  - dist/**/*
+  - package.json
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  icon: build/icon.icns
+  extraResources:
+    - from: ../futuristic/build
+      to: server
+      filter: ["**/*"]
+
+win:
+  target:
+    - nsis
+    - portable
+  icon: build/icon.ico
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+  icon: build/icon.png
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+
+# Publish config — left empty; CI can override with --publish flags.
+publish: null
