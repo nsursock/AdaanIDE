@@ -35,11 +35,12 @@
     IconCopy,
     IconRoute,
     IconBrain,
+    IconActivity,
   } from "@tabler/icons-svelte";
 
   let { open = $bindable(false) } = $props();
 
-  type TabId = "general" | "themes" | "models";
+  type TabId = "general" | "themes" | "models" | "telemetry";
   let activeTab = $state<TabId>("general");
 
   let apiKeyInput = $state("");
@@ -66,6 +67,11 @@
   let providersError = $state<string | null>(null);
   let servingModel = $state<string | null>(null);
   let serveModelError = $state<string | null>(null);
+
+  // --- Telemetry tab state ---
+  let telemetrySaving = $state(false);
+  let telemetrySaved = $state(false);
+  let telemetryError = $state<string | null>(null);
 
   const BASE_LABELS: { key: keyof ThemePalette["base"]; label: string }[] = [
     { key: "bg", label: "Background" },
@@ -250,6 +256,34 @@
     }
   }
 
+  // --- Telemetry tab functions ---
+
+  /** Push the current telemetry config (minus `enabled`) to the server so the
+   *  TelemetryStore applies it at runtime. `enabled` is client-side only. */
+  async function pushTelemetryConfig() {
+    telemetrySaving = true;
+    telemetryError = null;
+    try {
+      const { enabled: _enabled, ...params } = settingsStore.settings.telemetry;
+      const res = await fetch("/api/telemetry/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        telemetryError = data.error ?? "Failed to apply telemetry config";
+        return;
+      }
+      telemetrySaved = true;
+      setTimeout(() => (telemetrySaved = false), 2000);
+    } catch (e) {
+      telemetryError = e instanceof Error ? e.message : "Network error";
+    } finally {
+      telemetrySaving = false;
+    }
+  }
+
   function resetAll() {
     settingsStore.reset();
     apiKeyInput = "";
@@ -311,6 +345,15 @@
       >
         <IconCpu size={13} />
         <span>Models</span>
+      </button>
+      <button
+        class="settings-tab {activeTab === 'telemetry' ? 'active' : ''}"
+        role="tab"
+        aria-selected={activeTab === "telemetry"}
+        onclick={() => (activeTab = "telemetry")}
+      >
+        <IconActivity size={13} />
+        <span>Telemetry</span>
       </button>
     </div>
 
@@ -509,6 +552,152 @@
             No local providers found. Install <a href="https://ollama.com" target="_blank" rel="noopener" class="text-[var(--color-accent)] underline">Ollama</a>, <a href="https://rapidmlx.com" target="_blank" rel="noopener" class="text-[var(--color-accent)] underline">Rapid-MLX</a>, or <a href="https://lmstudio.ai" target="_blank" rel="noopener" class="text-[var(--color-accent)] underline">LM Studio</a> to use local models.
           </div>
         {/if}
+      </section>
+      {:else if activeTab === "telemetry"}
+      <!-- Telemetry tab: finetune telemetry collection & display -->
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <IconActivity size={14} class="text-[var(--color-accent)]" />
+          <span>Collection</span>
+        </div>
+        <label class="settings-row cursor-pointer">
+          <div>
+            <div class="text-xs font-semibold">Telemetry enabled</div>
+            <div class="text-[0.6875rem] text-[var(--color-muted)]">Record LLM requests, tasks, tokens, cost, and tool usage to the dashboard</div>
+          </div>
+          <button
+            class="toggle {settingsStore.settings.telemetry.enabled ? 'on' : ''}"
+            onclick={() => settingsStore.setTelemetryParam('enabled', !settingsStore.settings.telemetry.enabled)}
+            role="switch"
+            aria-checked={settingsStore.settings.telemetry.enabled}
+            aria-label="Toggle telemetry collection"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </label>
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
+          When disabled, the dashboard stops updating. Existing records are kept until you reset them.
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <IconActivity size={14} class="text-[var(--color-accent)]" />
+          <span>Retention &amp; Persistence</span>
+        </div>
+        <label class="settings-field">
+          <div class="settings-field-label">
+            <span>Max recent tasks</span>
+            <span class="settings-value">{settingsStore.settings.telemetry.maxRecentTasks}</span>
+          </div>
+          <input
+            type="range"
+            min={50}
+            max={2000}
+            step={50}
+            value={settingsStore.settings.telemetry.maxRecentTasks}
+            oninput={(e) => settingsStore.setTelemetryParam('maxRecentTasks', Number(e.currentTarget.value))}
+          />
+        </label>
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
+          Ring-buffer cap for recent task records. Older tasks are dropped as new ones complete.
+        </div>
+
+        <label class="settings-field mt-3">
+          <div class="settings-field-label">
+            <span>Max recent requests</span>
+            <span class="settings-value">{settingsStore.settings.telemetry.maxRecentRequests}</span>
+          </div>
+          <input
+            type="range"
+            min={100}
+            max={10000}
+            step={100}
+            value={settingsStore.settings.telemetry.maxRecentRequests}
+            oninput={(e) => settingsStore.setTelemetryParam('maxRecentRequests', Number(e.currentTarget.value))}
+          />
+        </label>
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
+          Ring-buffer cap for recent LLM request records. Lowering this trims the in-memory buffer immediately.
+        </div>
+
+        <label class="settings-field mt-3">
+          <div class="settings-field-label">
+            <span>Write debounce</span>
+            <span class="settings-value">{settingsStore.settings.telemetry.writeDebounceMs}ms</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={5000}
+            step={100}
+            value={settingsStore.settings.telemetry.writeDebounceMs}
+            oninput={(e) => settingsStore.setTelemetryParam('writeDebounceMs', Number(e.currentTarget.value))}
+          />
+        </label>
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
+          Delay before telemetry is flushed to <code class="font-mono">~/.adaan/telemetry.json</code>. 0 = write immediately (more disk I/O). Higher = fewer writes but more data at risk on crash.
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <IconActivity size={14} class="text-[var(--color-accent)]" />
+          <span>Dashboard</span>
+        </div>
+        <label class="settings-field">
+          <div class="settings-field-label">
+            <span>Trend window</span>
+            <span class="settings-value">{settingsStore.settings.telemetry.trendDays} days</span>
+          </div>
+          <input
+            type="range"
+            min={3}
+            max={30}
+            step={1}
+            value={settingsStore.settings.telemetry.trendDays}
+            oninput={(e) => settingsStore.setTelemetryParam('trendDays', Number(e.currentTarget.value))}
+          />
+        </label>
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
+          Number of days shown in the dashboard's trend chart. Affects the summary API response.
+        </div>
+
+        <label class="settings-field mt-3">
+          <div class="settings-field-label">
+            <span>Daily request quota</span>
+            <span class="settings-value">{settingsStore.settings.quotaDailyLimit || 'off'}</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={2000}
+            step={50}
+            value={settingsStore.settings.quotaDailyLimit}
+            oninput={(e) => settingsStore.setQuotaDailyLimit(Number(e.currentTarget.value))}
+          />
+        </label>
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
+          Free-regime daily LLM-request cap for the dashboard quota bar. 0 hides the bar. Set to match your OpenRouter free-tier limit.
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="flex items-center gap-2">
+          <button
+            class="settings-link-btn"
+            onclick={pushTelemetryConfig}
+            disabled={telemetrySaving}
+          >
+            {#if telemetrySaved}<IconCheck size={12} /> Applied{:else if telemetrySaving}Applying…{:else}Apply to server{/if}
+          </button>
+          {#if telemetryError}
+            <span class="text-[0.6875rem] text-[var(--color-error)]">{telemetryError}</span>
+          {/if}
+        </div>
+        <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-2">
+          Pushes the retention, debounce, and trend-window parameters to the running server. The <code class="font-mono">enabled</code> toggle and quota bar are client-side only.
+        </div>
       </section>
       {:else}
       <!-- Layout -->

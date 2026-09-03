@@ -10,7 +10,7 @@ export type {
   TelemetryData,
   TelemetrySummary,
 } from "./types.js";
-export { TelemetryStore, telemetryStore, type ActiveTask } from "./store.js";
+export { TelemetryStore, telemetryStore, type ActiveTask, type TelemetryConfig, DEFAULT_TELEMETRY_CONFIG } from "./store.js";
 export {
   computeRegimeMetrics,
   computeModelMatrix,

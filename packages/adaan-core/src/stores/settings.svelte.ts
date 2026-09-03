@@ -132,8 +132,26 @@ class SettingsStore {
     this.update({ explorationPaidEnabled: b });
   }
 
+  setQuotaDailyLimit(n: number) {
+    this.update({ quotaDailyLimit: Math.max(0, Math.floor(n)) });
+  }
+
   setSingleLocalModel(b: boolean) {
     this.update({ singleLocalModel: b });
+  }
+
+  /** Update a single telemetry tuning parameter and push it to the server. */
+  setTelemetryParam<K extends keyof Settings["telemetry"]>(
+    key: K,
+    value: Settings["telemetry"][K],
+  ) {
+    const telemetry = { ...this.settings.telemetry, [key]: value };
+    this.update({ telemetry });
+  }
+
+  /** Replace the entire telemetry config block. */
+  setTelemetry(telemetry: Settings["telemetry"]) {
+    this.update({ telemetry });
   }
 
   /** Set (or clear, when `alias` is empty) the display alias for a

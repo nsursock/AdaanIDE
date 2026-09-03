@@ -208,6 +208,48 @@ describe("TelemetryStore — summary metrics", () => {
     // most-recent first
     assert.equal(summary.recentTasks[0].prompt, "task 4");
   });
+
+  it("configure() updates tunable params and getConfig() reflects them", () => {
+    const { store } = freshStore();
+    const defaults = store.getConfig();
+    assert.equal(defaults.maxRecentTasks, 500);
+    assert.equal(defaults.trendDays, 14);
+
+    store.configure({ maxRecentTasks: 100, trendDays: 7, writeDebounceMs: 500 });
+    const cfg = store.getConfig();
+    assert.equal(cfg.maxRecentTasks, 100);
+    assert.equal(cfg.trendDays, 7);
+    assert.equal(cfg.writeDebounceMs, 500);
+    // untouched param stays at default
+    assert.equal(cfg.maxRecentRequests, 2000);
+  });
+
+  it("configure() trims in-memory buffers when caps are lowered", () => {
+    const { store } = freshStore();
+    for (let i = 0; i < 10; i++) {
+      const task = store.startTask("s1", "m:free", `task ${i}`);
+      store.finishTask(task, "success");
+    }
+    assert.equal(store.getSummary().recentTasks.length, 10);
+    store.configure({ maxRecentTasks: 3 });
+    assert.equal(store.getSummary().recentTasks.length, 3);
+  });
+
+  it("configure() trendDays changes the summary trend length", () => {
+    const { store } = freshStore();
+    store.configure({ trendDays: 7 });
+    const summary = store.getSummary();
+    assert.equal(summary.trend.length, 7);
+  });
+
+  it("configure() ignores invalid (non-positive) values", () => {
+    const { store } = freshStore();
+    store.configure({ maxRecentTasks: -5, writeDebounceMs: -1, trendDays: 0 });
+    const cfg = store.getConfig();
+    assert.equal(cfg.maxRecentTasks, 500);
+    assert.equal(cfg.writeDebounceMs, 1500);
+    assert.equal(cfg.trendDays, 14);
+  });
 });
 
 describe("TelemetryStore — persistence", () => {

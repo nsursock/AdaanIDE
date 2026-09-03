@@ -7,7 +7,7 @@ import type { ThemeId } from "../types.js";
 import { DEFAULT_THEME, THEME_IDS } from "../themes.js";
 
 /** Bump when the persisted shape changes; `migrateBlob` always rewrites to this. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /** Single localStorage key holding the whole settings blob as JSON. */
 export const STORAGE_KEY = "adaan.settings.v1";
@@ -85,6 +85,21 @@ export interface Settings {
    *  "always" = use for all tasks,
    *  "never" = always use the normal ReAct loop. */
   singleShotMode: "auto" | "always" | "never";
+  /** Telemetry tuning parameters. Persisted client-side and pushed to the
+   *  server via POST /api/telemetry/config so the TelemetryStore applies them
+   *  at runtime. */
+  telemetry: {
+    /** Whether telemetry collection is enabled. */
+    enabled: boolean;
+    /** Cap on the recent-tasks ring buffer. */
+    maxRecentTasks: number;
+    /** Cap on the recent-requests ring buffer. */
+    maxRecentRequests: number;
+    /** Persistence write debounce in ms. */
+    writeDebounceMs: number;
+    /** Number of days in the dashboard trend window. */
+    trendDays: number;
+  };
 }
 
 /** Build the stable key used in `modelAliases` for a discovered local model. */
@@ -113,6 +128,13 @@ export const DEFAULT_SETTINGS: Settings = {
   singleLocalModel: true,
   modelAliases: {},
   singleShotMode: "auto",
+  telemetry: {
+    enabled: true,
+    maxRecentTasks: 500,
+    maxRecentRequests: 2000,
+    writeDebounceMs: 1500,
+    trendDays: 14,
+  },
 };
 
 function clamp(n: number, min: number, max: number): number {
@@ -141,6 +163,31 @@ function safeAliases(value: unknown): Record<string, string> {
     if (typeof v === "string" && v.trim()) out[k] = v.trim();
   }
   return out;
+}
+
+/** Sanitize the persisted telemetry config — clamp numeric fields to sane
+ *  bounds so a corrupt blob can never produce nonsensical values. */
+function safeTelemetry(value: unknown): Settings["telemetry"] {
+  const obj = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  return {
+    enabled: typeof obj.enabled === "boolean" ? obj.enabled : DEFAULT_SETTINGS.telemetry.enabled,
+    maxRecentTasks:
+      typeof obj.maxRecentTasks === "number" && obj.maxRecentTasks > 0
+        ? Math.floor(obj.maxRecentTasks)
+        : DEFAULT_SETTINGS.telemetry.maxRecentTasks,
+    maxRecentRequests:
+      typeof obj.maxRecentRequests === "number" && obj.maxRecentRequests > 0
+        ? Math.floor(obj.maxRecentRequests)
+        : DEFAULT_SETTINGS.telemetry.maxRecentRequests,
+    writeDebounceMs:
+      typeof obj.writeDebounceMs === "number" && obj.writeDebounceMs >= 0
+        ? Math.floor(obj.writeDebounceMs)
+        : DEFAULT_SETTINGS.telemetry.writeDebounceMs,
+    trendDays:
+      typeof obj.trendDays === "number" && obj.trendDays > 0
+        ? Math.floor(obj.trendDays)
+        : DEFAULT_SETTINGS.telemetry.trendDays,
+  };
 }
 
 /**
@@ -218,6 +265,7 @@ export function migrateBlob(raw: unknown): Settings {
       obj.singleShotMode === "auto" || obj.singleShotMode === "always" || obj.singleShotMode === "never"
         ? obj.singleShotMode
         : DEFAULT_SETTINGS.singleShotMode,
+    telemetry: safeTelemetry(obj.telemetry),
   };
 }
 

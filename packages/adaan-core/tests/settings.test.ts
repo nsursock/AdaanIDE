@@ -95,10 +95,10 @@ test("migrateBlob: singleShotMode accepts auto/always/never, else default", () =
   assert.equal(migrateBlob({}).singleShotMode, "auto");
 });
 
-test("migrateBlob: schema version is 5", () => {
-  assert.equal(SCHEMA_VERSION, 5);
-  assert.equal(migrateBlob({}).schemaVersion, 5);
-  assert.equal(migrateBlob({ schemaVersion: 3 }).schemaVersion, 5);
+test("migrateBlob: schema version is 6", () => {
+  assert.equal(SCHEMA_VERSION, 6);
+  assert.equal(migrateBlob({}).schemaVersion, 6);
+  assert.equal(migrateBlob({ schemaVersion: 3 }).schemaVersion, 6);
 });
 
 test("migrateLegacy: folds legacy per-feature keys into a partial", () => {
@@ -160,4 +160,48 @@ test("migrateBlob: modelAliases falls back to empty map on bad input", () => {
   assert.deepEqual(migrateBlob({ modelAliases: "nope" }).modelAliases, {});
   assert.deepEqual(migrateBlob({ modelAliases: ["a", "b"] }).modelAliases, {});
   assert.deepEqual(migrateBlob({}).modelAliases, {});
+});
+
+test("migrateBlob: telemetry config defaults when absent", () => {
+  const out = migrateBlob({});
+  assert.deepEqual(out.telemetry, DEFAULT_SETTINGS.telemetry);
+  assert.equal(out.telemetry.enabled, true);
+  assert.equal(out.telemetry.maxRecentTasks, 500);
+  assert.equal(out.telemetry.maxRecentRequests, 2000);
+  assert.equal(out.telemetry.writeDebounceMs, 1500);
+  assert.equal(out.telemetry.trendDays, 14);
+});
+
+test("migrateBlob: telemetry config preserves valid values", () => {
+  const out = migrateBlob({
+    telemetry: {
+      enabled: false,
+      maxRecentTasks: 1000,
+      maxRecentRequests: 5000,
+      writeDebounceMs: 3000,
+      trendDays: 7,
+    },
+  });
+  assert.equal(out.telemetry.enabled, false);
+  assert.equal(out.telemetry.maxRecentTasks, 1000);
+  assert.equal(out.telemetry.maxRecentRequests, 5000);
+  assert.equal(out.telemetry.writeDebounceMs, 3000);
+  assert.equal(out.telemetry.trendDays, 7);
+});
+
+test("migrateBlob: telemetry config clamps invalid values to defaults", () => {
+  const out = migrateBlob({
+    telemetry: {
+      enabled: "yes",
+      maxRecentTasks: -5,
+      maxRecentRequests: 0,
+      writeDebounceMs: -100,
+      trendDays: 0,
+    },
+  });
+  assert.equal(out.telemetry.enabled, true); // non-boolean → default
+  assert.equal(out.telemetry.maxRecentTasks, 500);
+  assert.equal(out.telemetry.maxRecentRequests, 2000);
+  assert.equal(out.telemetry.writeDebounceMs, 1500);
+  assert.equal(out.telemetry.trendDays, 14);
 });

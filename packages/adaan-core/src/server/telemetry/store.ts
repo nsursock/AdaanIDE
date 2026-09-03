@@ -16,10 +16,26 @@ import type {
 import { isUpgrade, type Outcome } from "../learn/outcome.js";
 
 const TELEMETRY_FILE = path.join(os.homedir(), ".adaan", "telemetry.json");
-const MAX_RECENT_TASKS = 500;
-const MAX_RECENT_REQUESTS = 2000;
-const WRITE_DEBOUNCE_MS = 1500;
-const TREND_DAYS = 14;
+
+/** Default telemetry tuning parameters (overridable via `configure()`). */
+export const DEFAULT_TELEMETRY_CONFIG = {
+  /** Cap on the recent-tasks ring buffer. */
+  maxRecentTasks: 500,
+  /** Cap on the recent-requests ring buffer. */
+  maxRecentRequests: 2000,
+  /** Persistence write debounce in ms. */
+  writeDebounceMs: 1500,
+  /** Number of days in the dashboard trend window. */
+  trendDays: 14,
+} as const;
+
+/** Tunable telemetry parameters. */
+export interface TelemetryConfig {
+  maxRecentTasks: number;
+  maxRecentRequests: number;
+  writeDebounceMs: number;
+  trendDays: number;
+}
 
 function todayStr(d = new Date()): string {
   return d.toISOString().slice(0, 10);
@@ -159,11 +175,42 @@ export class TelemetryStore {
   private now: () => number = Date.now;
   /** Injected file path for tests (overrides TELEMETRY_FILE). */
   private filePath: string = TELEMETRY_FILE;
+  /** Tunable parameters (overridable via `configure()`). */
+  private config: TelemetryConfig = { ...DEFAULT_TELEMETRY_CONFIG };
 
   /** Test hook: inject a custom clock and persistence path. */
   _configure(opts: { now?: () => number; filePath?: string }) {
     if (opts.now) this.now = opts.now;
     if (opts.filePath) this.filePath = opts.filePath;
+  }
+
+  /** Update tunable telemetry parameters at runtime. Unknown keys are
+   *  ignored; values are clamped to sane bounds. */
+  configure(opts: Partial<TelemetryConfig>): void {
+    if (typeof opts.maxRecentTasks === "number" && opts.maxRecentTasks > 0) {
+      this.config.maxRecentTasks = Math.floor(opts.maxRecentTasks);
+      // Trim the in-memory buffer if the cap was lowered.
+      if (this.data.recentTasks.length > this.config.maxRecentTasks) {
+        this.data.recentTasks.length = this.config.maxRecentTasks;
+      }
+    }
+    if (typeof opts.maxRecentRequests === "number" && opts.maxRecentRequests > 0) {
+      this.config.maxRecentRequests = Math.floor(opts.maxRecentRequests);
+      if (this.data.recentRequests.length > this.config.maxRecentRequests) {
+        this.data.recentRequests.length = this.config.maxRecentRequests;
+      }
+    }
+    if (typeof opts.writeDebounceMs === "number" && opts.writeDebounceMs >= 0) {
+      this.config.writeDebounceMs = Math.floor(opts.writeDebounceMs);
+    }
+    if (typeof opts.trendDays === "number" && opts.trendDays > 0) {
+      this.config.trendDays = Math.floor(opts.trendDays);
+    }
+  }
+
+  /** Read the current tunable parameters. */
+  getConfig(): TelemetryConfig {
+    return { ...this.config };
   }
 
   async load(): Promise<void> {
@@ -222,7 +269,7 @@ export class TelemetryStore {
     this.writeTimer = setTimeout(() => {
       this.writeTimer = undefined;
       void this.flush();
-    }, WRITE_DEBOUNCE_MS);
+    }, this.config.writeDebounceMs);
   }
 
   /** Force an immediate write (e.g. on graceful shutdown). */
@@ -351,8 +398,8 @@ export class TelemetryStore {
       success: opts.success,
     };
     this.data.recentRequests.unshift(rec);
-    if (this.data.recentRequests.length > MAX_RECENT_REQUESTS) {
-      this.data.recentRequests.length = MAX_RECENT_REQUESTS;
+    if (this.data.recentRequests.length > this.config.maxRecentRequests) {
+      this.data.recentRequests.length = this.config.maxRecentRequests;
     }
 
     // Fold into the day's rollup.
@@ -462,8 +509,8 @@ export class TelemetryStore {
     };
     this.active.delete(task.taskId);
     this.data.recentTasks.unshift(rec);
-    if (this.data.recentTasks.length > MAX_RECENT_TASKS) {
-      this.data.recentTasks.length = MAX_RECENT_TASKS;
+    if (this.data.recentTasks.length > this.config.maxRecentTasks) {
+      this.data.recentTasks.length = this.config.maxRecentTasks;
     }
 
     const rollup = this.rollupFor(task.day);
@@ -548,9 +595,9 @@ export class TelemetryStore {
     const totalToolOps = todayRollup.toolCalls + todayRollup.cacheHits;
     const cacheHitRate = totalToolOps > 0 ? todayRollup.cacheHits / totalToolOps : 0;
 
-    // 14-day trend (oldest → newest), including today even if empty.
+    // Trend window (oldest → newest), including today even if empty.
     const trend: DailyRollup[] = [];
-    for (let i = TREND_DAYS - 1; i >= 0; i--) {
+    for (let i = this.config.trendDays - 1; i >= 0; i--) {
       const d = new Date(this.now());
       d.setDate(d.getDate() - i);
       const key = todayStr(d);
