@@ -2,6 +2,7 @@
   import {
     workspaceStore,
     settingsStore,
+    projectsStore,
     SIDEBAR_MIN,
     SIDEBAR_MAX,
     CHAT_MIN,
@@ -13,6 +14,7 @@
   import { cubicInOut } from "svelte/easing";
   import { gsap } from "gsap";
   import WorkspacePicker from "$lib/components/WorkspacePicker.svelte";
+  import ProjectSwitcher from "$lib/components/ProjectSwitcher.svelte";
   import FileTree from "$lib/components/FileTree.svelte";
   import HistoryPanel from "$lib/components/HistoryPanel.svelte";
   import Editor from "$lib/components/Editor.svelte";
@@ -29,13 +31,14 @@
     IconCube,
     IconHome,
     IconTerminal2,
-    IconFolderCode,
     IconSparkles,
     IconSettings,
     IconChartBar,
   } from "@tabler/icons-svelte";
 
-  let workspaceRoot = $state<string | null>(null);
+  // The active project's root path (null when the launcher is showing).
+  // Backed by the projectsStore so multi-project switching is reflected here.
+  let workspaceRoot = $derived(projectsStore.activeRoot);
   let showSidebar = $state(true);
   let showChat = $state(true);
   let threeEnabled = $state(true);
@@ -118,8 +121,8 @@
   });
 
   async function openWorkspace(root: string) {
-    workspaceRoot = root;
-    workspaceStore.setWorkspace({ rootPath: root, name: root.split("/").pop() || root });
+    const name = root.split("/").pop() || root;
+    projectsStore.openProject(root, name);
     await loadTree();
     requestAnimationFrame(() => {
       gsap.from(".panel-enter", { y: 15, opacity: 0, duration: 0.5, stagger: 0.08, ease: "power3.out" });
@@ -127,11 +130,44 @@
     });
   }
 
+  /** Switch to an already-open project. If the project's tree is stale
+   *  (a background agent modified files), reload the tree and refresh open
+   *  tabs from disk so the user sees the latest state. */
+  function switchToProject(id: string) {
+    const entry = projectsStore.switchTo(id);
+    if (entry?.treeStale) {
+      loadTree();
+      refreshOpenTabs();
+      projectsStore.clearTreeStale(entry.rootPath);
+    }
+    requestAnimationFrame(() => {
+      gsap.from(".panel-enter", { y: 12, opacity: 0, duration: 0.4, stagger: 0.06, ease: "power3.out" });
+    });
+  }
+
+  /** Re-fetch content for all non-dirty open tabs so they reflect on-disk
+   *  changes made by a background agent while the user was viewing another
+   *  project. Dirty tabs (user has unsaved edits) are left alone. */
+  async function refreshOpenTabs() {
+    if (!workspaceRoot) return;
+    for (const tab of workspaceStore.openTabs) {
+      if (tab.dirty) continue;
+      try {
+        const res = await fetch(`/api/files/read?root=${encodeURIComponent(workspaceRoot)}&path=${encodeURIComponent(tab.path)}`);
+        if (res.ok) {
+          const data = await res.json();
+          tab.content = data.content;
+          tab.hash = data.hash;
+          tab.dirty = false;
+        }
+      } catch {
+        // file may have been deleted — ignore
+      }
+    }
+  }
+
   function backToPicker() {
-    workspaceRoot = null;
-    workspaceStore.setWorkspace({ rootPath: "", name: "" });
-    workspaceStore.setTree([]);
-    workspaceStore.openTabs = [];
+    projectsStore.showPicker();
   }
 
   async function loadTree() {
@@ -213,7 +249,10 @@
 </script>
 
 {#if !workspaceRoot}
-  <WorkspacePicker on:open={(e) => openWorkspace(e.detail)} />
+  <WorkspacePicker
+    on:open={(e) => openWorkspace(e.detail)}
+    on:switch={(e) => switchToProject(e.detail)}
+  />
 {:else}
   <!-- App bar -->
   <header class="app-bar flex items-center justify-between">
@@ -231,11 +270,8 @@
 
       <span class="opacity-25 text-xs select-none">//</span>
 
-      <!-- Workspace directory pill -->
-      <div class="ws-badge truncate max-w-xs sm:max-w-md" title={workspaceStore.workspace?.rootPath}>
-        <IconFolderCode size={14} class="text-[var(--color-accent)] flex-shrink-0" />
-        <span class="font-bold truncate text-[var(--color-text)]">{workspaceStore.workspace?.name}</span>
-      </div>
+      <!-- Workspace project switcher (top bar) -->
+      <ProjectSwitcher on:openpicker={backToPicker} />
 
       <span class="status-chip hidden md:inline-flex">
         <span class="dot"></span> sys: online

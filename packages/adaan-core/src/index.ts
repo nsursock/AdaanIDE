@@ -38,8 +38,9 @@ export { computeLineDiff, changedNewLines, diffStats } from "./diff.js";
 export type { DiffOpType, DiffLine, DiffStats } from "./diff.js";
 
 // Stores (client-safe)
-export { themeStore, workspaceStore, chatStore, settingsStore } from "./stores/index.js";
-export type { OpenTab, PatchSignal, PendingFileChange, ChatMessageEntry, TimelineSegment, Settings } from "./stores/index.js";
+export { themeStore, workspaceStore, chatStore, settingsStore, projectsStore } from "./stores/index.js";
+export type { OpenTab, PatchSignal, PendingFileChange, ChatMessageEntry, TimelineSegment, Settings, ProjectEntry, PendingApproval, ChatSession } from "./stores/index.js";
+export { applyChatEvent, isTerminalEvent } from "./stores/index.js";
 export {
   SCHEMA_VERSION,
   STORAGE_KEY,

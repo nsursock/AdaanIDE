@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { chatStore, workspaceStore, settingsStore, type ModelInfo, type LocalModelInfo, type ChatMessageEntry } from "@adaan/core";
+  import { chatStore, workspaceStore, settingsStore, projectsStore, type ModelInfo, type LocalModelInfo, type ChatMessageEntry } from "@adaan/core";
   import { onMount } from "svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ModelPicker from "./ModelPicker.svelte";
   import ToolCallCard from "./ToolCallCard.svelte";
   import ApprovalPrompt from "./ApprovalPrompt.svelte";
+  import ChatTabs from "./ChatTabs.svelte";
   import {
     IconSend,
     IconSquare,
@@ -27,8 +28,6 @@
   let models = $state<{ free: ModelInfo[]; paid: ModelInfo[]; local: LocalModelInfo[] } | null>(null);
   let servingLocal = $state(false);
   let serveError = $state<string | null>(null);
-  let eventSource: EventSource | null = null;
-  let pendingApprovals = $state<Array<{ sessionId: string; toolCallId: string; toolName: string; args: any }>>([]);
   let messagesContainer: HTMLDivElement;
   let copied = $state(false);
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -67,6 +66,20 @@
     await loadModels();
   });
 
+  // Register file-change and tree-refresh callbacks with projectsStore.
+  // When a file-modifying tool result arrives for the ACTIVE project's
+  // background stream, the store calls these to trigger editor side effects
+  // (flash, tab update, pending-change recording) and tree refresh.
+  // Background projects just get `treeStale = true`.
+  $effect(() => {
+    projectsStore.onFileChange((projectRoot, eventData) => {
+      if (projectRoot === workspaceRoot) handleAgentFileChange(eventData);
+    });
+    projectsStore.onTreeRefresh(() => {
+      if (workspaceRoot) onFileChanged();
+    });
+  });
+
   async function loadModels() {
     try {
       const res = await fetch("/api/models");
@@ -74,11 +87,18 @@
         models = await res.json();
         // Ensure local array exists even if the server didn't send one
         if (models && !models.local) models.local = [];
-        // Restore the user's last-selected model if it's still available;
-        // otherwise fall back to the first free tools-capable model.
-        if (models && !chatStore.restoreModel(models)) {
+        // If the active chat already has a selected model, use it.
+        // Otherwise restore the user's last-selected model from persisted
+        // settings, or fall back to the first free tools-capable model.
+        const activeChat = projectsStore.activeChat;
+        if (activeChat?.selectedModel) {
+          chatStore.setModel(activeChat.selectedModel);
+        } else if (models && !chatStore.restoreModel(models)) {
           const free = models.free.find((m) => m.toolsCapable);
-          if (free) chatStore.setModel(free);
+          if (free) {
+            chatStore.setModel(free);
+            if (activeChat) activeChat.selectedModel = free;
+          }
         }
       }
     } catch {
@@ -104,9 +124,13 @@
    * Select a non-local (OpenRouter) model. The provider routes based on
    * the model name — OpenRouter models go to openrouter.ai, local models
    * go to the local endpoint. No endpoint reset needed.
+   * Also syncs the selection to the active chat's `selectedModel` so each
+   * chat remembers its own model independently.
    */
   function selectModel(model: ModelInfo) {
     chatStore.setModel(model);
+    const activeChat = projectsStore.activeChat;
+    if (activeChat) activeChat.selectedModel = model;
   }
 
   /**
@@ -142,6 +166,9 @@
       // the localModel ref sent with every request. Persisting the stable
       // discovery id also makes the selection survive reloads.
       chatStore.setModel(model);
+      // Sync the selection to the active chat's selectedModel.
+      const activeChat = projectsStore.activeChat;
+      if (activeChat) activeChat.selectedModel = model;
       // Refresh the model list so running badges reflect the new state
       // (the old server was stopped, the new one is running).
       await loadModels();
@@ -176,10 +203,12 @@
     const message = input.trim();
     input = "";
 
-    // Close the current SSE stream — the new turn will open a fresh one.
-    eventSource?.close();
-    eventSource = null;
-    pendingApprovals = [];
+    // Stop the current SSE stream — the new turn will open a fresh one.
+    // The backend aborts the in-flight generator via the stream's cancel()
+    // propagation. We do NOT cancel the session (that would 404 the next
+    // turn); just close the client-side connection.
+    const chatId = projectsStore.activeChatId;
+    if (chatId) projectsStore.stopStream(chatId);
     chatStore.cancelPendingToolCalls();
     chatStore.finishStreaming();
 
@@ -236,6 +265,9 @@
    */
   async function sendMessage(message: string) {
     if (chatStore.streaming) return;
+    if (!workspaceRoot) return;
+    const chatId = projectsStore.activeChatId;
+    if (!chatId) return;
     // The user just sent a message — force the chat to scroll to the bottom
     // so their message and the incoming reply are visible, even if they had
     // scrolled up to read earlier history.
@@ -244,9 +276,18 @@
     // now-abandoned turn — the backend auto-denies those (see
     // AgentSession.resume()), so drop the matching UI state too instead of
     // leaving cards stuck showing "pending" forever.
-    pendingApprovals = [];
+    const activeChat = projectsStore.activeChat;
+    if (activeChat) {
+      activeChat.pendingApprovals = [];
+    }
     chatStore.cancelPendingToolCalls();
     chatStore.addUserMessage(message);
+
+    // Update the chat tab title from the first user message.
+    if (activeChat && activeChat.messages.length === 1) {
+      const title = message.length > 40 ? message.slice(0, 37) + "…" : message;
+      projectsStore.setChatTitle(chatId, title);
+    }
 
     const selected = chatStore.selectedModel;
     const local = localRef(selected);
@@ -304,77 +345,18 @@
 
     const assistantId = chatStore.startAssistantMessage();
 
-    eventSource?.close();
-    eventSource = new EventSource(`/api/sessions/${sessionId}/events`);
-
-    // Track whether we received a terminal event so onerror can
-    // distinguish a clean close from a mid-stream disconnect.
-    let streamTerminated = false;
-
-    eventSource.onmessage = (e) => {
-      const event = JSON.parse(e.data);
-      chatStore.handleEvent(assistantId, event);
-
-      if (event.type === "tool.approval_required") {
-        pendingApprovals.push({
-          sessionId,
-          toolCallId: event.data.toolCallId,
-          toolName: event.data.toolName,
-          args: event.data.args,
-        });
-        pendingApprovals = [...pendingApprovals];
-      }
-
-      // When the agent patches or writes a file, bring it forward in the
-      // editor and flash the changed lines so the user sees what happened.
-      if (event.type === "tool.result" && event.data?.toolName) {
-        const toolName = event.data.toolName as string;
-        if (toolName === "apply_patch" || toolName === "write_file") {
-          handleAgentFileChange(event.data);
-        }
-        // Any file-modifying tool should refresh the file browser so new
-        // files appear and deleted ones disappear.
-        if (
-          toolName === "apply_patch" ||
-          toolName === "write_file" ||
-          toolName === "create_file" ||
-          toolName === "delete_file"
-        ) {
-          onFileChanged();
-        }
-      }
-
-      if (event.type === "done" || event.type === "error" || event.type === "cancelled") {
-        streamTerminated = true;
-        eventSource?.close();
-        eventSource = null;
-      }
-    };
-
-    eventSource.onerror = () => {
-      eventSource?.close();
-      eventSource = null;
-      // If we never received a terminal event, the connection was lost
-      // mid-stream (server crash, network drop, or stalled request that
-      // the hard-deadline killed). Show an error instead of leaving a
-      // silent empty bubble with "Streaming" stuck on.
-      if (!streamTerminated && chatStore.streaming) {
-        chatStore.setAssistantError(
-          assistantId,
-          "Connection lost — the request stalled or the server dropped the stream. Try sending your message again.",
-        );
-      }
-      chatStore.finishStreaming();
-    };
+    // Delegate stream management to projectsStore — the EventSource is keyed
+    // by chat id and persists across project/chat switches so the turn keeps
+    // running in the background. Events are routed to the chat's messages
+    // via applyChatEvent; file-change side effects and tree refresh are
+    // handled via callbacks registered above.
+    projectsStore.startStream(chatId, sessionId, assistantId);
   }
 
   async function cancel() {
-    if (chatStore.sessionId) {
-      await fetch(`/api/sessions/${chatStore.sessionId}/cancel`, { method: "POST" });
-      eventSource?.close();
-      eventSource = null;
-      chatStore.finishStreaming();
-    }
+    const chatId = projectsStore.activeChatId;
+    if (!chatId) return;
+    await projectsStore.cancelStream(chatId);
   }
 
   /**
@@ -458,19 +440,17 @@
   }
 
   async function approve(toolCallId: string, approved: boolean) {
-    if (chatStore.sessionId) {
-      await fetch(`/api/sessions/${chatStore.sessionId}/approve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ toolCallId, approved }),
-      });
-    }
-    pendingApprovals = pendingApprovals.filter((p) => p.toolCallId !== toolCallId);
+    const chatId = projectsStore.activeChatId;
+    if (!chatId) return;
+    await projectsStore.resolveApproval(chatId, toolCallId, approved);
   }
 
+  /** Start a fresh chat within the active project. The old chat stays in
+   *  its tab — this creates a new one and switches to it. */
   function clearChat() {
-    chatStore.clear();
-    pendingApprovals = [];
+    const activeProject = projectsStore.active;
+    if (!activeProject) return;
+    projectsStore.createChat(activeProject.id);
   }
 
   /**
@@ -579,15 +559,18 @@
         class="icon-btn"
         style="width:1.6rem;height:1.6rem;"
         onclick={clearChat}
-        title="Reset conversation"
-        aria-label="Clear chat"
+        title="New chat"
+        aria-label="New chat"
       >
         <IconRefresh size={13} />
       </button>
     </div>
   </div>
 
-  <!-- Model Selector -->
+  <!-- Chat Tabs (multiple conversations per project) -->
+  <ChatTabs />
+
+  <!-- Model Selector (per-chat — each chat has its own selected model) -->
   {#if models}
     <ModelPicker {models} onSelectLocal={selectLocalModel} onSelect={selectModel} />
   {/if}
@@ -638,8 +621,8 @@
       {/each}
     {/if}
 
-    <!-- Pending Approvals -->
-    {#each pendingApprovals as approval (approval.toolCallId)}
+    <!-- Pending Approvals (from the active project's stream) -->
+    {#each projectsStore.activePendingApprovals as approval (approval.toolCallId)}
       <ApprovalPrompt
         toolName={approval.toolName}
         args={approval.args}

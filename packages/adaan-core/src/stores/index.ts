@@ -2,9 +2,12 @@ export { settingsStore } from "./settings.svelte.js";
 export { themeStore } from "./theme.svelte.js";
 export { workspaceStore } from "./workspace.svelte.js";
 export { chatStore } from "./chat.svelte.js";
+export { projectsStore } from "./projects.svelte.js";
 export type { Settings } from "./settings.js";
 export type { OpenTab, PatchSignal, PendingFileChange } from "./workspace.svelte.js";
 export type { ChatMessageEntry, TimelineSegment } from "./chat.svelte.js";
+export type { ProjectEntry, PendingApproval, ChatSession } from "./projects.svelte.js";
+export { applyChatEvent, isTerminalEvent } from "./chat-events.js";
 export {
   SCHEMA_VERSION,
   STORAGE_KEY,

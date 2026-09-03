@@ -10,8 +10,10 @@
     IconTerminal2,
     IconSparkles,
     IconPlus,
+    IconX,
   } from "@tabler/icons-svelte";
   import { gsap } from "gsap";
+  import { projectsStore } from "@adaan/core";
 
   const dispatch = createEventDispatcher();
 
@@ -166,6 +168,24 @@
       creating = false;
     }
   }
+
+  function switchToProject(id: string) {
+    dispatch("switch", id);
+  }
+
+  async function closeOpenProject(id: string, e: MouseEvent) {
+    e.stopPropagation();
+    const result = projectsStore.closeProject(id);
+    if (result?.sessionIds) {
+      for (const sid of result.sessionIds) {
+        try {
+          await fetch(`/api/sessions/${sid}`, { method: "DELETE" });
+        } catch {
+          // best-effort
+        }
+      }
+    }
+  }
 </script>
 
 <section class="relative h-full w-full flex flex-col items-center justify-center px-6 py-10 overflow-hidden" style="background: var(--color-bg);">
@@ -220,7 +240,36 @@
         <div class="py-10 text-center opacity-60 font-mono text-sm">
           <span class="caret-blink">initializing</span>
         </div>
-      {:else if !hasExisting}
+      {:else}
+        {#if projectsStore.projects.length > 0}
+          <div class="mb-4">
+            <div class="flex items-center gap-2 text-xs font-semibold mb-2 tracking-wider uppercase" style="color: var(--color-muted);">
+              <IconFolder size={14} /> Open projects · {projectsStore.projects.length}
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {#each projectsStore.projects as p (p.id)}
+                <div class="ws-card group" style="cursor: pointer;" onclick={() => switchToProject(p.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === "Enter") switchToProject(p.id); }} title={p.rootPath}>
+                  <IconFolder size={18} style="color: var(--color-accent); flex-shrink: 0;" />
+                  <span class="min-w-0 flex-1 truncate">
+                    <span class="ws-name block truncate">{p.name}</span>
+                    <span class="ws-path block truncate">{dirname(p.rootPath)}</span>
+                  </span>
+                  <button
+                    class="ws-card-close"
+                    title="Close project"
+                    aria-label="Close project"
+                    onclick={(e) => closeOpenProject(p.id, e)}
+                  >
+                    <IconX size={13} />
+                  </button>
+                  <IconArrowRight size={14} style="color: var(--color-muted); flex-shrink: 0;" />
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        {#if !hasExisting}
         <div class="flex flex-col gap-4">
           <div class="text-sm font-mono opacity-70 py-2 text-center">
             No existing projects detected — initialize a new one to begin.
@@ -390,6 +439,7 @@
             {/if}
           </div>
         </div>
+      {/if}
       {/if}
 
       {#if error}
