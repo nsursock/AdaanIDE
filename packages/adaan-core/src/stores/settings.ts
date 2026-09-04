@@ -7,7 +7,15 @@ import type { ThemeId } from "../types.js";
 import { DEFAULT_THEME, THEME_IDS } from "../themes.js";
 
 /** Bump when the persisted shape changes; `migrateBlob` always rewrites to this. */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
+
+/** Top-level app mode — which workspace shell is active.
+ *  - `editor`: the classic 3-pane IDE (file tree · editor · chat + terminal)
+ *  - `agent`: chat-left / github-top-right / terminal-bottom-right (planned)
+ *  - `stats`: telemetry dashboard with masonry cards (Hellstats-inspired)
+ *  - `monitoring`: committee-of-agents code review on a schedule (planned) */
+export type AppMode = "editor" | "agent" | "stats" | "monitoring";
+export const APP_MODES: AppMode[] = ["editor", "agent", "stats", "monitoring"];
 
 /** Single localStorage key holding the whole settings blob as JSON. */
 export const STORAGE_KEY = "adaan.settings.v1";
@@ -34,6 +42,8 @@ export const TERMINAL_MODES: TerminalMode[] = ["full", "editor"];
 export interface Settings {
   schemaVersion: number;
   theme: ThemeId;
+  /** Active workspace shell mode (editor / agent / stats / monitoring). */
+  mode: AppMode;
   sidebarWidth: number;
   chatWidth: number;
   /** Height of the bottom terminal pane in px (when open). */
@@ -110,6 +120,7 @@ export function modelAliasKey(providerId: string, modelId: string): string {
 export const DEFAULT_SETTINGS: Settings = {
   schemaVersion: SCHEMA_VERSION,
   theme: DEFAULT_THEME,
+  mode: "editor",
   sidebarWidth: DEFAULT_SIDEBAR_W,
   chatWidth: DEFAULT_CHAT_W,
   terminalHeight: DEFAULT_TERMINAL_H,
@@ -152,6 +163,12 @@ function safeTerminalMode(value: unknown): TerminalMode {
   return typeof value === "string" && (TERMINAL_MODES as string[]).includes(value)
     ? (value as TerminalMode)
     : "full";
+}
+
+function safeMode(value: unknown): AppMode {
+  return typeof value === "string" && (APP_MODES as string[]).includes(value)
+    ? (value as AppMode)
+    : "editor";
 }
 
 /** Sanitize the persisted model-aliases map — keep only non-empty string
@@ -200,6 +217,7 @@ export function migrateBlob(raw: unknown): Settings {
   return {
     schemaVersion: SCHEMA_VERSION,
     theme: safeTheme(obj.theme),
+    mode: safeMode(obj.mode),
     sidebarWidth: clamp(
       typeof obj.sidebarWidth === "number" ? obj.sidebarWidth : DEFAULT_SETTINGS.sidebarWidth,
       SIDEBAR_MIN,

@@ -23,7 +23,8 @@
   import TerminalPane from "$lib/components/TerminalPane.svelte";
   import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
-  import TelemetryPanel from "$lib/components/TelemetryPanel.svelte";
+  import ModeRail from "$lib/components/ModeRail.svelte";
+  import StatsView from "$lib/components/StatsView.svelte";
   import {
     IconCode,
     IconMessage,
@@ -33,17 +34,16 @@
     IconTerminal2,
     IconSparkles,
     IconSettings,
-    IconChartBar,
   } from "@tabler/icons-svelte";
 
   // The active project's root path (null when the launcher is showing).
   // Backed by the projectsStore so multi-project switching is reflected here.
   let workspaceRoot = $derived(projectsStore.activeRoot);
+  let mode = $derived(settingsStore.settings.mode);
   let showSidebar = $state(true);
   let showChat = $state(true);
   let threeEnabled = $state(true);
   let showSettings = $state(false);
-  let showTelemetry = $state(false);
   let showTerminal = $state(settingsStore.settings.terminalEnabled);
 
   // --- Resizable sidebars ---------------------------------------------------
@@ -254,162 +254,179 @@
     on:switch={(e) => switchToProject(e.detail)}
   />
 {:else}
-  <!-- App bar -->
-  <header class="app-bar flex items-center justify-between">
-    <div class="flex items-center gap-2.5 min-w-0">
-      <button class="icon-btn" onclick={backToPicker} title="Return to launcher console" aria-label="Return to launcher console">
-        <IconHome size={16} />
-      </button>
+  <div class="mode-shell flex-1 flex overflow-hidden">
+    <!-- Mode rail (far left) -->
+    <ModeRail workspaceActive={true} />
 
-      <div class="flex items-center gap-1.5 select-none">
-        <span class="brand-mark text-base font-black">AdaanIDE</span>
-        <span class="text-[0.6875rem] px-1.5 py-0.5 rounded border border-[var(--color-border)] opacity-75 font-semibold text-[var(--color-accent)]">
-          ⟨ v1.0 ⟩
-        </span>
-      </div>
+    <!-- Right of rail: app bar + mode-specific content -->
+    <div class="flex-1 flex flex-col overflow-hidden min-w-0">
+      <!-- App bar -->
+      <header class="app-bar flex items-center justify-between">
+        <div class="flex items-center gap-2.5 min-w-0">
+          <button class="icon-btn" onclick={backToPicker} title="Return to launcher console" aria-label="Return to launcher console">
+            <IconHome size={16} />
+          </button>
 
-      <span class="opacity-25 text-xs select-none">//</span>
+          <div class="flex items-center gap-1.5 select-none">
+            <span class="brand-mark text-base font-black">AdaanIDE</span>
+            <span class="text-[0.6875rem] px-1.5 py-0.5 rounded border border-[var(--color-border)] opacity-75 font-semibold text-[var(--color-accent)]">
+              ⟨ v1.0 ⟩
+            </span>
+          </div>
 
-      <!-- Workspace project switcher (top bar) -->
-      <ProjectSwitcher on:openpicker={backToPicker} />
+          <span class="opacity-25 text-xs select-none">//</span>
 
-      <span class="status-chip hidden md:inline-flex">
-        <span class="dot"></span> sys: online
-      </span>
-    </div>
+          <!-- Workspace project switcher (top bar) -->
+          <ProjectSwitcher on:openpicker={backToPicker} />
 
-    <!-- Right HUD controls -->
-    <div class="flex items-center gap-1.5">
-      <button
-        class="icon-btn {showSidebar ? 'active' : ''}"
-        onclick={() => showSidebar = !showSidebar}
-        title="{showSidebar ? 'Hide' : 'Show'} File Explorer"
-        aria-label="Toggle file explorer"
-      >
-        <IconFolder size={16} />
-      </button>
-      <button
-        class="icon-btn {showChat ? 'active' : ''}"
-        onclick={() => showChat = !showChat}
-        title="{showChat ? 'Hide' : 'Show'} Neural Agent"
-        aria-label="Toggle neural agent"
-      >
-        <IconMessage size={16} />
-      </button>
-      <button
-        class="icon-btn {showTerminal ? 'active' : ''}"
-        onclick={toggleTerminal}
-        title="{showTerminal ? 'Hide' : 'Show'} Terminal"
-        aria-label="Toggle terminal"
-      >
-        <IconTerminal2 size={16} />
-      </button>
-      <a
-        href="http://localhost:5173"
-        class="icon-btn"
-        title="Switch to Classic UI"
-        aria-label="Classic version"
-      >
-        <IconCode size={16} />
-      </a>
-      <div class="w-px h-4 mx-0.5 bg-[var(--color-border)] opacity-60"></div>
-      <ThemeSwitcher />
-      <button
-        class="icon-btn {showTelemetry ? 'active' : ''}"
-        onclick={() => showTelemetry = !showTelemetry}
-        title="Telemetry"
-        aria-label="Open telemetry console"
-      >
-        <IconChartBar size={16} />
-      </button>
-      <button
-        class="icon-btn {showSettings ? 'active' : ''}"
-        onclick={() => showSettings = !showSettings}
-        title="Settings"
-        aria-label="Open settings"
-      >
-        <IconSettings size={16} />
-      </button>
-    </div>
-  </header>
+          <span class="status-chip hidden md:inline-flex">
+            <span class="dot"></span> sys: online
+          </span>
+        </div>
 
-  <!-- Main 3-pane layout -->
-  <div class="flex-1 flex overflow-hidden gap-1 p-1" style="background: rgba(var(--bg-deep-rgb), 0.4);">
-    {#if showSidebar}
-      <div
-        class="sidebar-wrap"
-        transition:fly={{ x: -sidebarWidth, duration: 280, easing: cubicInOut, opacity: 0 }}
-      >
-        <aside
-          class="panel-enter pane pane-bracketed flex flex-col overflow-hidden rounded-lg"
-          style="width: {sidebarWidth}px;"
-        >
-          <FileTree on:open={(e) => openFile(e.detail)} on:refresh={loadTree} />
-          <HistoryPanel {workspaceRoot} />
-        </aside>
-        <button
-          type="button"
-          class="resizer"
-          onmousedown={(e) => startResize("sidebar", e)}
-          tabindex="-1"
-          aria-label="Resize sidebar"
-        ></button>
-      </div>
-    {/if}
+        <!-- Right HUD controls -->
+        <div class="flex items-center gap-1.5">
+          {#if mode === "editor"}
+            <button
+              class="icon-btn {showSidebar ? 'active' : ''}"
+              onclick={() => showSidebar = !showSidebar}
+              title="{showSidebar ? 'Hide' : 'Show'} File Explorer"
+              aria-label="Toggle file explorer"
+            >
+              <IconFolder size={16} />
+            </button>
+            <button
+              class="icon-btn {showChat ? 'active' : ''}"
+              onclick={() => showChat = !showChat}
+              title="{showChat ? 'Hide' : 'Show'} Neural Agent"
+              aria-label="Toggle neural agent"
+            >
+              <IconMessage size={16} />
+            </button>
+            <button
+              class="icon-btn {showTerminal ? 'active' : ''}"
+              onclick={toggleTerminal}
+              title="{showTerminal ? 'Hide' : 'Show'} Terminal"
+              aria-label="Toggle terminal"
+            >
+              <IconTerminal2 size={16} />
+            </button>
+          {/if}
+          <a
+            href="http://localhost:5173"
+            class="icon-btn"
+            title="Switch to Classic UI"
+            aria-label="Classic version"
+            aria-disabled="true"
+            style="pointer-events: none; opacity: 0.3;"
+          >
+            <IconCode size={16} />
+          </a>
+          <div class="w-px h-4 mx-0.5 bg-[var(--color-border)] opacity-60"></div>
+          <ThemeSwitcher />
+          <button
+            class="icon-btn {showSettings ? 'active' : ''}"
+            onclick={() => showSettings = !showSettings}
+            title="Settings"
+            aria-label="Open settings"
+          >
+            <IconSettings size={16} />
+          </button>
+        </div>
+      </header>
 
-    <div class="editor-col flex-1 flex flex-col overflow-hidden gap-1 min-w-0">
-      <main class="panel-enter pane pane-bracketed flex-1 flex flex-col overflow-hidden rounded-lg">
-        {#if showTelemetry}
-          <TelemetryPanel onClose={() => (showTelemetry = false)} />
-        {:else}
-          <Tabs on:close={(e) => workspaceStore.closeTab(e.detail)} />
-          <Editor {workspaceRoot} on:save={(e) => saveFile(e.detail.path, e.detail.content, e.detail.hash)} />
+      <!-- Mode-specific content -->
+      {#if mode === "stats"}
+        <StatsView />
+      {:else if mode === "agent"}
+        <div class="mode-placeholder">
+          <IconSparkles size={40} />
+          <div class="mode-placeholder-title">Agent Mode</div>
+          <div class="mode-placeholder-hint">Chat-left · GitHub top-right · Terminal bottom-right. Coming soon.</div>
+        </div>
+      {:else if mode === "monitoring"}
+        <div class="mode-placeholder">
+          <IconCube size={40} />
+          <div class="mode-placeholder-title">Monitoring Mode</div>
+          <div class="mode-placeholder-hint">A committee of agents reviews the code every N hours and critiques the project. Coming soon.</div>
+        </div>
+      {:else}
+        <!-- Editor mode: classic 3-pane layout -->
+        <div class="flex-1 flex overflow-hidden gap-1 p-1" style="background: rgba(var(--bg-deep-rgb), 0.4);">
+          {#if showSidebar}
+            <div
+              class="sidebar-wrap"
+              transition:fly={{ x: -sidebarWidth, duration: 280, easing: cubicInOut, opacity: 0 }}
+            >
+              <aside
+                class="panel-enter pane pane-bracketed flex flex-col overflow-hidden rounded-lg"
+                style="width: {sidebarWidth}px;"
+              >
+                <FileTree on:open={(e) => openFile(e.detail)} on:refresh={loadTree} />
+                <HistoryPanel {workspaceRoot} />
+              </aside>
+              <button
+                type="button"
+                class="resizer"
+                onmousedown={(e) => startResize("sidebar", e)}
+                tabindex="-1"
+                aria-label="Resize sidebar"
+              ></button>
+            </div>
+          {/if}
+
+          <div class="editor-col flex-1 flex flex-col overflow-hidden gap-1 min-w-0">
+            <main class="panel-enter pane pane-bracketed flex-1 flex flex-col overflow-hidden rounded-lg">
+              <Tabs on:close={(e) => workspaceStore.closeTab(e.detail)} />
+              <Editor {workspaceRoot} on:save={(e) => saveFile(e.detail.path, e.detail.content, e.detail.hash)} />
+            </main>
+            {#if showTerminal && settingsStore.settings.terminalMode === "editor"}
+              <button
+                type="button"
+                class="terminal-resizer"
+                onmousedown={startTerminalResize}
+                tabindex="-1"
+                aria-label="Resize terminal"
+              ></button>
+              <TerminalPane {workspaceRoot} height={terminalHeight} />
+            {/if}
+          </div>
+
+          {#if showChat}
+            <div
+              class="chat-wrap"
+              transition:fly={{ x: chatWidth, duration: 280, easing: cubicInOut, opacity: 0 }}
+            >
+              <button
+                type="button"
+                class="resizer"
+                onmousedown={(e) => startResize("chat", e)}
+                tabindex="-1"
+                aria-label="Resize chat panel"
+              ></button>
+              <aside
+                class="panel-enter pane pane-bracketed flex flex-col overflow-hidden rounded-lg"
+                style="width: {chatWidth}px;"
+              >
+                <ChatPanel {workspaceRoot} onFileChanged={loadTree} />
+              </aside>
+            </div>
+          {/if}
+        </div>
+
+        {#if showTerminal && settingsStore.settings.terminalMode === "full"}
+          <button
+            type="button"
+            class="terminal-resizer"
+            onmousedown={startTerminalResize}
+            tabindex="-1"
+            aria-label="Resize terminal"
+          ></button>
+          <TerminalPane {workspaceRoot} height={terminalHeight} />
         {/if}
-      </main>
-      {#if showTerminal && settingsStore.settings.terminalMode === "editor"}
-        <button
-          type="button"
-          class="terminal-resizer"
-          onmousedown={startTerminalResize}
-          tabindex="-1"
-          aria-label="Resize terminal"
-        ></button>
-        <TerminalPane {workspaceRoot} height={terminalHeight} />
       {/if}
     </div>
-
-    {#if showChat}
-      <div
-        class="chat-wrap"
-        transition:fly={{ x: chatWidth, duration: 280, easing: cubicInOut, opacity: 0 }}
-      >
-        <button
-          type="button"
-          class="resizer"
-          onmousedown={(e) => startResize("chat", e)}
-          tabindex="-1"
-          aria-label="Resize chat panel"
-        ></button>
-        <aside
-          class="panel-enter pane pane-bracketed flex flex-col overflow-hidden rounded-lg"
-          style="width: {chatWidth}px;"
-        >
-          <ChatPanel {workspaceRoot} onFileChanged={loadTree} />
-        </aside>
-      </div>
-    {/if}
   </div>
-
-  {#if showTerminal && settingsStore.settings.terminalMode === "full"}
-    <button
-      type="button"
-      class="terminal-resizer"
-      onmousedown={startTerminalResize}
-      tabindex="-1"
-      aria-label="Resize terminal"
-    ></button>
-    <TerminalPane {workspaceRoot} height={terminalHeight} />
-  {/if}
 {/if}
 
 <SettingsPanel bind:open={showSettings} />

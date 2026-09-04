@@ -95,10 +95,20 @@ test("migrateBlob: singleShotMode accepts auto/always/never, else default", () =
   assert.equal(migrateBlob({}).singleShotMode, "auto");
 });
 
-test("migrateBlob: schema version is 6", () => {
-  assert.equal(SCHEMA_VERSION, 6);
-  assert.equal(migrateBlob({}).schemaVersion, 6);
-  assert.equal(migrateBlob({ schemaVersion: 3 }).schemaVersion, 6);
+test("migrateBlob: schema version is 7", () => {
+  assert.equal(SCHEMA_VERSION, 7);
+  assert.equal(migrateBlob({}).schemaVersion, 7);
+  assert.equal(migrateBlob({ schemaVersion: 3 }).schemaVersion, 7);
+});
+
+test("migrateBlob: mode accepts editor/agent/stats/monitoring, else defaults to editor", () => {
+  assert.equal(migrateBlob({ mode: "stats" }).mode, "stats");
+  assert.equal(migrateBlob({ mode: "agent" }).mode, "agent");
+  assert.equal(migrateBlob({ mode: "monitoring" }).mode, "monitoring");
+  assert.equal(migrateBlob({ mode: "editor" }).mode, "editor");
+  assert.equal(migrateBlob({}).mode, "editor");
+  assert.equal(migrateBlob({ mode: "invalid" }).mode, "editor");
+  assert.equal(migrateBlob({ mode: 123 }).mode, "editor");
 });
 
 test("migrateLegacy: folds legacy per-feature keys into a partial", () => {

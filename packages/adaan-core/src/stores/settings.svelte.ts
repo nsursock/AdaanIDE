@@ -8,6 +8,7 @@ import {
   migrateLegacy,
   modelAliasKey,
   type Settings,
+  type AppMode,
 } from "./settings.js";
 
 const isBrowser = typeof window !== "undefined";
@@ -74,6 +75,10 @@ class SettingsStore {
 
   setTheme(id: ThemeId) {
     this.update({ theme: id });
+  }
+
+  setMode(mode: AppMode) {
+    this.update({ mode });
   }
 
   setSidebarWidth(n: number) {
