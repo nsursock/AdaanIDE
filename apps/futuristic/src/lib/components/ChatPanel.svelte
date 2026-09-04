@@ -24,6 +24,23 @@
 
   let { workspaceRoot, onFileChanged = () => {} } = $props();
 
+  // Trailing-edge throttle for file-tree refreshes during agent runs.
+  // When fileTreeRefresh === "throttled", batch repeated refresh calls into
+  // a single fetch 2s after the last file-writing tool result.
+  let treeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  function throttledTreeRefresh() {
+    const mode = settingsStore.settings.performance.fileTreeRefresh;
+    if (mode === "throttled") {
+      if (treeRefreshTimer) clearTimeout(treeRefreshTimer);
+      treeRefreshTimer = setTimeout(() => {
+        treeRefreshTimer = null;
+        if (workspaceRoot) onFileChanged();
+      }, 2000);
+    } else {
+      if (workspaceRoot) onFileChanged();
+    }
+  }
+
   let input = $state("");
   let models = $state<{ free: ModelInfo[]; paid: ModelInfo[]; local: LocalModelInfo[] } | null>(null);
   let servingLocal = $state(false);
@@ -76,7 +93,7 @@
       if (projectRoot === workspaceRoot) handleAgentFileChange(eventData);
     });
     projectsStore.onTreeRefresh(() => {
-      if (workspaceRoot) onFileChanged();
+      throttledTreeRefresh();
     });
   });
 

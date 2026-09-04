@@ -2065,4 +2065,54 @@ html, body {
   opacity: 0.7;
 }
 
+/* === Performance gating ================================================
+   When <html> has the `perf-lite` class (Performance preset or individual
+   toggle off), we kill the expensive CSS effects: backdrop-filter blur,
+   infinite animations, and heavy glows. This is the single CSS hook that
+   makes the "Performance" preset feel instant. */
+
+/* Glass blur → solid surface fallback */
+html.perf-lite .glass {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: var(--color-surface-solid);
+}
+
+/* Kill infinite animations — explicitly listed by class/selector so we
+   don't accidentally break the dirty-indicator or status pulse-dot which
+   convey state. */
+html.perf-lite .hero-title { animation: none; }
+html.perf-lite .hero-title-glitch:hover::before,
+html.perf-lite .hero-title-glitch:hover::after { animation: none; }
+html.perf-lite .scan-sweep { animation: none; }
+html.perf-lite .neon-flicker { animation: none; }
+html.perf-lite .float-y { animation: none; }
+html.perf-lite .border-pulse { animation: none; }
+html.perf-lite .caret-blink { animation: none; }
+html.perf-lite .dot-pulse { animation: none; }
+html.perf-lite .ring-rotate { animation: none; }
+
+/* Reduce heavy drop-shadow glows on decorative elements */
+html.perf-lite .glow-accent { box-shadow: none; }
+html.perf-lite .glow-cyan { box-shadow: none; }
+html.perf-lite .glow-text { text-shadow: none; }
+html.perf-lite .editor-empty .editor-empty-glyph { filter: none; }
+html.perf-lite .mode-placeholder :global(svg) { filter: none; }
+
+/* === prefers-reduced-motion: force the same lightweight path for a11y === */
+@media (prefers-reduced-motion: reduce) {
+  .hero-title { animation: none !important; }
+  .hero-title-glitch:hover::before,
+  .hero-title-glitch:hover::after { animation: none !important; }
+  .scan-sweep { animation: none !important; }
+  .neon-flicker { animation: none !important; }
+  .float-y { animation: none !important; }
+  .border-pulse { animation: none !important; }
+  .caret-blink { animation: none !important; }
+  .dot-pulse { animation: none !important; }
+  .ring-rotate { animation: none !important; }
+  * { scroll-behavior: auto !important; }
+}
+
+
 

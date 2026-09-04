@@ -14,8 +14,16 @@
     DEFAULT_SIDEBAR_W,
     DEFAULT_CHAT_W,
     DEFAULT_TERMINAL_H,
+    PERF_PRESETS,
+    THREE_QUALITIES,
+    STREAMING_RENDERS,
+    FILE_TREE_REFRESHES,
     modelAliasKey,
     type ThemePalette,
+    type PerfPreset,
+    type ThreeQuality,
+    type StreamingRender,
+    type FileTreeRefresh,
   } from "@adaan/core";
   import { fly, fade } from "svelte/transition";
   import { cubicInOut } from "svelte/easing";
@@ -36,11 +44,12 @@
     IconRoute,
     IconBrain,
     IconActivity,
+    IconBolt,
   } from "@tabler/icons-svelte";
 
   let { open = $bindable(false) } = $props();
 
-  type TabId = "general" | "themes" | "models" | "telemetry";
+  type TabId = "general" | "themes" | "models" | "telemetry" | "performance";
   let activeTab = $state<TabId>("general");
 
   let apiKeyInput = $state("");
@@ -354,6 +363,15 @@
       >
         <IconActivity size={13} />
         <span>Telemetry</span>
+      </button>
+      <button
+        class="settings-tab {activeTab === 'performance' ? 'active' : ''}"
+        role="tab"
+        aria-selected={activeTab === "performance"}
+        onclick={() => (activeTab = "performance")}
+      >
+        <IconBolt size={13} />
+        <span>Performance</span>
       </button>
     </div>
 
@@ -699,6 +717,195 @@
           Pushes the retention, debounce, and trend-window parameters to the running server. The <code class="font-mono">enabled</code> toggle and quota bar are client-side only.
         </div>
       </section>
+      {:else if activeTab === "performance"}
+      <!-- Performance tab: game-style graphics quality presets -->
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <IconBolt size={14} class="text-[var(--color-accent)]" />
+          <span>Preset</span>
+        </div>
+        <div class="flex gap-2">
+          {#each ["quality", "balanced", "performance"] as preset}
+            <button
+              class="perf-preset-btn {settingsStore.settings.performance.preset === preset ? 'active' : ''}"
+              onclick={() => settingsStore.applyPerformancePreset(preset as Exclude<PerfPreset, "custom">)}
+            >
+              {preset.charAt(0).toUpperCase() + preset.slice(1)}
+            </button>
+          {/each}
+        </div>
+        {#if settingsStore.settings.performance.preset === "custom"}
+          <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 mt-2">
+            Custom — individual toggles have been adjusted
+          </div>
+        {:else if settingsStore.settings.performance.preset === "quality"}
+          <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 mt-2">
+            All eye-candy on — today's default look.
+          </div>
+        {:else if settingsStore.settings.performance.preset === "balanced"}
+          <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 mt-2">
+            Three.js on (medium), pause when hidden, throttled tree refresh.
+          </div>
+        {:else if settingsStore.settings.performance.preset === "performance"}
+          <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 mt-2">
+            Three.js off, glass off, animations off — maximum speed.
+          </div>
+        {/if}
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <IconBackground size={14} class="text-[var(--color-accent)]" />
+          <span>Three.js Background</span>
+        </div>
+        <label class="settings-row cursor-pointer">
+          <div>
+            <div class="text-xs font-semibold">Enabled</div>
+            <div class="text-[0.6875rem] text-[var(--color-muted)]">Animated particle field behind the UI</div>
+          </div>
+          <button
+            class="toggle {settingsStore.settings.performance.threeEnabled ? 'on' : ''}"
+            onclick={() => settingsStore.setPerformanceParam('threeEnabled', !settingsStore.settings.performance.threeEnabled)}
+            role="switch"
+            aria-checked={settingsStore.settings.performance.threeEnabled}
+            aria-label="Toggle Three.js background"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </label>
+        <div class="settings-field mt-3">
+          <div class="settings-field-label">
+            <span>Quality</span>
+            <span class="settings-value">{settingsStore.settings.performance.threeQuality}</span>
+          </div>
+          <div class="flex gap-2 mt-1">
+            {#each THREE_QUALITIES as q}
+              <button
+                class="perf-tier-btn {settingsStore.settings.performance.threeQuality === q ? 'active' : ''}"
+                onclick={() => settingsStore.setPerformanceParam('threeQuality', q as ThreeQuality)}
+                disabled={!settingsStore.settings.performance.threeEnabled}
+              >
+                {q.charAt(0).toUpperCase() + q.slice(1)}
+              </button>
+            {/each}
+          </div>
+          <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
+            Minimal = 150 particles, DPR 1, no AA. Low = 400, DPR 1, no AA. Medium = 1000, DPR 1.5, AA. High = 2000, DPR 2, AA.
+          </div>
+        </div>
+        <label class="settings-row cursor-pointer mt-3">
+          <div>
+            <div class="text-xs font-semibold">Pause when tab hidden</div>
+            <div class="text-[0.6875rem] text-[var(--color-muted)]">Stop the render loop when the tab is in the background</div>
+          </div>
+          <button
+            class="toggle {settingsStore.settings.performance.pauseWhenHidden ? 'on' : ''}"
+            onclick={() => settingsStore.setPerformanceParam('pauseWhenHidden', !settingsStore.settings.performance.pauseWhenHidden)}
+            role="switch"
+            aria-checked={settingsStore.settings.performance.pauseWhenHidden}
+            aria-label="Toggle pause when hidden"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <IconPalette size={14} class="text-[var(--color-accent)]" />
+          <span>Visual Effects</span>
+        </div>
+        <label class="settings-row cursor-pointer">
+          <div>
+            <div class="text-xs font-semibold">Glass blur</div>
+            <div class="text-[0.6875rem] text-[var(--color-muted)]">backdrop-filter blur on panes and popovers</div>
+          </div>
+          <button
+            class="toggle {settingsStore.settings.performance.glassEffects ? 'on' : ''}"
+            onclick={() => settingsStore.setPerformanceParam('glassEffects', !settingsStore.settings.performance.glassEffects)}
+            role="switch"
+            aria-checked={settingsStore.settings.performance.glassEffects}
+            aria-label="Toggle glass effects"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </label>
+        <label class="settings-row cursor-pointer mt-3">
+          <div>
+            <div class="text-xs font-semibold">Animations</div>
+            <div class="text-[0.6875rem] text-[var(--color-muted)]">GSAP entrances + infinite CSS animations (scan, glow, pulse)</div>
+          </div>
+          <button
+            class="toggle {settingsStore.settings.performance.animationsEnabled ? 'on' : ''}"
+            onclick={() => settingsStore.setPerformanceParam('animationsEnabled', !settingsStore.settings.performance.animationsEnabled)}
+            role="switch"
+            aria-checked={settingsStore.settings.performance.animationsEnabled}
+            aria-label="Toggle animations"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <div class="settings-section-title">
+          <IconCpu size={14} class="text-[var(--color-accent)]" />
+          <span>Rendering</span>
+        </div>
+        <div class="settings-field">
+          <div class="settings-field-label">
+            <span>Chat streaming</span>
+            <span class="settings-value">{settingsStore.settings.performance.streamingRender}</span>
+          </div>
+          <div class="flex gap-2 mt-1">
+            {#each STREAMING_RENDERS as mode}
+              <button
+                class="perf-tier-btn {settingsStore.settings.performance.streamingRender === mode ? 'active' : ''}"
+                onclick={() => settingsStore.setPerformanceParam('streamingRender', mode as StreamingRender)}
+              >
+                {mode.charAt(0).toUpperCase() + mode.slice(1)}
+              </button>
+            {/each}
+          </div>
+          <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
+            Smooth = per-token re-render. Throttled = buffer deltas, flush every ~100ms (fewer re-renders during long agent runs).
+          </div>
+        </div>
+        <label class="settings-row cursor-pointer mt-3">
+          <div>
+            <div class="text-xs font-semibold">Editor live-sync</div>
+            <div class="text-[0.6875rem] text-[var(--color-muted)]">Update file content on every keystroke (off = debounce, save reads from editor directly)</div>
+          </div>
+          <button
+            class="toggle {settingsStore.settings.performance.editorLiveSync ? 'on' : ''}"
+            onclick={() => settingsStore.setPerformanceParam('editorLiveSync', !settingsStore.settings.performance.editorLiveSync)}
+            role="switch"
+            aria-checked={settingsStore.settings.performance.editorLiveSync}
+            aria-label="Toggle editor live sync"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </label>
+        <div class="settings-field mt-3">
+          <div class="settings-field-label">
+            <span>File-tree refresh</span>
+            <span class="settings-value">{settingsStore.settings.performance.fileTreeRefresh}</span>
+          </div>
+          <div class="flex gap-2 mt-1">
+            {#each FILE_TREE_REFRESHES as mode}
+              <button
+                class="perf-tier-btn {settingsStore.settings.performance.fileTreeRefresh === mode ? 'active' : ''}"
+                onclick={() => settingsStore.setPerformanceParam('fileTreeRefresh', mode as FileTreeRefresh)}
+              >
+                {mode.charAt(0).toUpperCase() + mode.slice(1)}
+              </button>
+            {/each}
+          </div>
+          <div class="text-[0.6875rem] text-[var(--color-muted)] opacity-70 leading-relaxed mt-1">
+            Immediate = refetch on every agent file write. Throttled = 2s trailing-edge debounce during multi-file runs.
+          </div>
+        </div>
+      </section>
       {:else}
       <!-- Layout -->
       <section class="settings-section">
@@ -917,13 +1124,13 @@
         <label class="settings-row cursor-pointer">
           <div>
             <div class="text-xs font-semibold">Three.js particle field</div>
-            <div class="text-[0.6875rem] text-[var(--color-muted)]">Animated background behind the UI</div>
+            <div class="text-[0.6875rem] text-[var(--color-muted)]">Animated background behind the UI — finer controls on the Performance tab</div>
           </div>
           <button
-            class="toggle {settingsStore.settings.threeEnabled ? 'on' : ''}"
-            onclick={() => settingsStore.setThreeEnabled(!settingsStore.settings.threeEnabled)}
+            class="toggle {settingsStore.settings.performance.threeEnabled ? 'on' : ''}"
+            onclick={() => settingsStore.setPerformanceParam('threeEnabled', !settingsStore.settings.performance.threeEnabled)}
             role="switch"
-            aria-checked={settingsStore.settings.threeEnabled}
+            aria-checked={settingsStore.settings.performance.threeEnabled}
             aria-label="Toggle Three.js background"
           >
             <span class="toggle-knob"></span>
@@ -957,8 +1164,8 @@
     left: 50%;
     transform: translate(-50%, -50%);
     z-index: 100;
-    width: min(440px, 92vw);
-    max-height: min(640px, 88vh);
+    width: min(520px, 92vw);
+    max-height: min(680px, 88vh);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -1005,6 +1212,33 @@
   .settings-tab.active {
     color: var(--color-accent);
     border-bottom-color: var(--color-accent);
+  }
+
+  /* Performance tab — preset and tier selector buttons */
+  .perf-preset-btn, .perf-tier-btn {
+    padding: 0.3rem 0.7rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--bg-deep-rgb), 0.4);
+    color: var(--color-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .perf-preset-btn:hover, .perf-tier-btn:hover {
+    border-color: var(--color-border-accent);
+    color: var(--color-text);
+  }
+  .perf-preset-btn.active, .perf-tier-btn.active {
+    background: rgba(var(--accent-rgb), 0.12);
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+    box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.2);
+  }
+  .perf-tier-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 
   .swatch-list {

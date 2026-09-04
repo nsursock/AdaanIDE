@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher, onMount, onDestroy } from "svelte";
-  import { workspaceStore, THEMES, diffStats, type DiffLine } from "@adaan/core";
+  import { workspaceStore, settingsStore, THEMES, diffStats, type DiffLine } from "@adaan/core";
   import { EditorState, Compartment, StateEffect, StateField } from "@codemirror/state";
   import { EditorView, keymap, Decoration, WidgetType, type DecorationSet } from "@codemirror/view";
   import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
@@ -29,6 +29,24 @@
   let view: EditorView | null = null;
   const themeCompartment = new Compartment();
   const langCompartment = new Compartment();
+
+  // Debounced editor→store sync — when editorLiveSync is false, we don't
+  // write tab.content on every keystroke (O(doc-size) stringify + reactive
+  // re-render). Instead we flush 300ms after the last keystroke, and
+  // immediately before tab switches / destroy.
+  let contentFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastFlushedTabPath: string | null = null;
+
+  function flushContent() {
+    if (contentFlushTimer) {
+      clearTimeout(contentFlushTimer);
+      contentFlushTimer = null;
+    }
+    if (view && lastFlushedTabPath) {
+      const tab = workspaceStore.openTabs.find((t) => t.path === lastFlushedTabPath);
+      if (tab) tab.content = view.state.doc.toString();
+    }
+  }
 
   // --- Line flash highlight for agent patches ---
   const flashEffect = StateEffect.define<number[]>();
@@ -212,6 +230,7 @@
           preventDefault: true,
           run: () => {
             if (view) {
+              flushContent();
               const tab = workspaceStore.activeTab;
               if (tab) {
                 dispatch("save", { path: tab.path, content: view.state.doc.toString(), hash: tab.hash });
@@ -229,8 +248,16 @@
           if (update.docChanged) {
             const tab = workspaceStore.activeTab;
             if (tab) {
-              tab.content = update.state.doc.toString();
               tab.dirty = true;
+              if (settingsStore.settings.performance.editorLiveSync) {
+                // Eager mode — write on every keystroke (today's behavior).
+                tab.content = update.state.doc.toString();
+              } else {
+                // Debounced mode — flush 300ms after the last keystroke.
+                lastFlushedTabPath = tab.path;
+                if (contentFlushTimer) clearTimeout(contentFlushTimer);
+                contentFlushTimer = setTimeout(flushContent, 300);
+              }
             }
           }
           if (update.selectionSet || update.docChanged) {
@@ -243,6 +270,8 @@
 
   function initEditor() {
     if (!editorDiv) return;
+    // Flush any pending debounced content before switching tabs.
+    flushContent();
     const tab = workspaceStore.activeTab;
     if (!tab) {
       if (view) {
@@ -312,6 +341,7 @@
   });
 
   onDestroy(() => {
+    flushContent();
     if (view) view.destroy();
   });
 

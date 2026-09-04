@@ -4,11 +4,14 @@ import {
   STORAGE_KEY,
   LEGACY_KEYS,
   DEFAULT_SETTINGS,
+  PRESET_VALUES,
   migrateBlob,
   migrateLegacy,
   modelAliasKey,
   type Settings,
   type AppMode,
+  type PerformanceSettings,
+  type PerfPreset,
 } from "./settings.js";
 
 const isBrowser = typeof window !== "undefined";
@@ -161,6 +164,34 @@ class SettingsStore {
   /** Replace the entire telemetry config block. */
   setTelemetry(telemetry: Settings["telemetry"]) {
     this.update({ telemetry });
+  }
+
+  /** Update a single performance parameter. Touching any individual toggle
+   *  flips the preset to "custom" (unless it already matches a preset). */
+  setPerformanceParam<K extends keyof Omit<PerformanceSettings, "preset">>(
+    key: K,
+    value: PerformanceSettings[K],
+  ) {
+    const performance = { ...this.settings.performance, [key]: value, preset: "custom" as PerfPreset };
+    // Keep top-level threeEnabled in sync.
+    const partial: Partial<Settings> = { performance };
+    if (key === "threeEnabled") partial.threeEnabled = value as boolean;
+    this.update(partial);
+  }
+
+  /** Apply a named preset (quality / balanced / performance) — bulk-writes
+   *  all the mapped values and sets the preset field. */
+  applyPerformancePreset(preset: Exclude<PerfPreset, "custom">) {
+    const values = PRESET_VALUES[preset];
+    const performance: PerformanceSettings = { preset, ...values };
+    this.update({ performance, threeEnabled: values.threeEnabled });
+  }
+
+  /** True when the app should use the lightweight CSS path (no glass blur,
+   *  no infinite animations). Drives the `perf-lite` class on <html>. */
+  get perfLite(): boolean {
+    const p = this.settings.performance;
+    return !p.glassEffects || !p.animationsEnabled || p.preset === "performance";
   }
 
   /** Set (or clear, when `alias` is empty) the display alias for a

@@ -70,6 +70,13 @@ class ChatStore {
   streaming = $state(false);
   sessionId = $state<string | null>(null);
 
+  // --- Throttled streaming buffer ---
+  // When streamingRender === "throttled", text.delta and reasoning.delta
+  // events are buffered here (non-reactive) and flushed every 100ms so
+  // Svelte doesn't re-render the whole ChatMessage on every token.
+  private deltaBuffer: Array<{ assistantId: string; event: AgentEvent }> = [];
+  private deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
   setModel(model: ModelInfo | null) {
     this.selectedModel = model;
     settingsStore.setSelectedModelId(model?.id ?? null);
@@ -310,9 +317,41 @@ class ChatStore {
   }
 
   handleEvent(assistantId: string, event: AgentEvent) {
+    const throttled = settingsStore.settings.performance.streamingRender === "throttled";
+    const isDelta = event.type === "text.delta" || event.type === "reasoning.delta";
+
+    if (throttled && isDelta) {
+      // Buffer deltas — flush on a 100ms timer to batch re-renders.
+      this.deltaBuffer.push({ assistantId, event });
+      if (!this.deltaFlushTimer) {
+        this.deltaFlushTimer = setTimeout(() => this.flushDeltas(), 100);
+      }
+      // Still clear the status line on the first token (cheap, not a re-render of content).
+      if (event.type === "text.delta") {
+        applyChatEvent(this.messages, assistantId, { type: "status", data: { message: "" } });
+      }
+      return;
+    }
+
+    // Non-delta events and smooth-mode deltas are applied immediately.
     applyChatEvent(this.messages, assistantId, event);
     if (isTerminalEvent(event)) {
+      this.flushDeltas();
       this.finishStreaming();
+    }
+  }
+
+  /** Flush buffered text/reasoning deltas in a single batch. */
+  private flushDeltas() {
+    if (this.deltaFlushTimer) {
+      clearTimeout(this.deltaFlushTimer);
+      this.deltaFlushTimer = null;
+    }
+    if (this.deltaBuffer.length === 0) return;
+    const batch = this.deltaBuffer;
+    this.deltaBuffer = [];
+    for (const { assistantId, event } of batch) {
+      applyChatEvent(this.messages, assistantId, event);
     }
   }
 }

@@ -7,7 +7,7 @@ import type { ThemeId } from "../types.js";
 import { DEFAULT_THEME, THEME_IDS } from "../themes.js";
 
 /** Bump when the persisted shape changes; `migrateBlob` always rewrites to this. */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /** Top-level app mode — which workspace shell is active.
  *  - `editor`: the classic 3-pane IDE (file tree · editor · chat + terminal)
@@ -38,6 +38,46 @@ export const DEFAULT_TERMINAL_H = 220;
  *  contained between the sidebar and chat panes (under the editor only). */
 export type TerminalMode = "full" | "editor";
 export const TERMINAL_MODES: TerminalMode[] = ["full", "editor"];
+
+/** Performance preset — game-style graphics menu. "custom" is set
+ *  automatically when any individual toggle is changed away from a preset. */
+export type PerfPreset = "quality" | "balanced" | "performance" | "custom";
+export const PERF_PRESETS: PerfPreset[] = ["quality", "balanced", "performance", "custom"];
+
+/** Three.js background quality tier. */
+export type ThreeQuality = "minimal" | "low" | "medium" | "high";
+export const THREE_QUALITIES: ThreeQuality[] = ["minimal", "low", "medium", "high"];
+
+/** Chat streaming render mode. "smooth" = per-token updates, "throttled" = buffered flush. */
+export type StreamingRender = "smooth" | "throttled";
+export const STREAMING_RENDERS: StreamingRender[] = ["smooth", "throttled"];
+
+/** File-tree refresh strategy after agent file writes. */
+export type FileTreeRefresh = "immediate" | "throttled";
+export const FILE_TREE_REFRESHES: FileTreeRefresh[] = ["immediate", "throttled"];
+
+/** Performance settings block — controls the trade-off between eye-candy and
+ *  speed. Defaults (the "quality" preset) preserve today's look so existing
+ *  users see zero behavior change on upgrade. */
+export interface PerformanceSettings {
+  preset: PerfPreset;
+  /** Master WebGL switch (mirrors the legacy top-level `threeEnabled`). */
+  threeEnabled: boolean;
+  /** Particle count / DPR cap / antialias tier. */
+  threeQuality: ThreeQuality;
+  /** Stop the Three.js RAF loop when the tab is hidden. */
+  pauseWhenHidden: boolean;
+  /** GSAP entrance animations + infinite CSS animations. */
+  animationsEnabled: boolean;
+  /** `backdrop-filter: blur()` glassmorphism on panes/popovers. */
+  glassEffects: boolean;
+  /** Chat token re-render strategy. */
+  streamingRender: StreamingRender;
+  /** false = debounced editor→store sync (no per-keystroke O(doc) stringify). */
+  editorLiveSync: boolean;
+  /** File-tree refetch strategy after agent writes. */
+  fileTreeRefresh: FileTreeRefresh;
+}
 
 export interface Settings {
   schemaVersion: number;
@@ -112,6 +152,8 @@ export interface Settings {
     /** Number of days in the dashboard trend window. */
     trendDays: number;
   };
+  /** Performance / graphics settings — game-style quality presets. */
+  performance: PerformanceSettings;
 }
 
 /** Build the stable key used in `modelAliases` for a discovered local model. */
@@ -130,7 +172,7 @@ export const DEFAULT_SETTINGS: Settings = {
   terminalEnabled: false,
   terminalMode: "full",
   selectedModelId: null,
-  threeEnabled: true,
+  threeEnabled: false,
   openrouterApiKey: null,
   providerBaseUrl: null,
   routingMode: "manual",
@@ -148,6 +190,52 @@ export const DEFAULT_SETTINGS: Settings = {
     maxRecentRequests: 2000,
     writeDebounceMs: 1500,
     trendDays: 14,
+  },
+  performance: {
+    preset: "performance",
+    threeEnabled: false,
+    threeQuality: "minimal",
+    pauseWhenHidden: true,
+    animationsEnabled: false,
+    glassEffects: false,
+    streamingRender: "throttled",
+    editorLiveSync: false,
+    fileTreeRefresh: "throttled",
+  },
+};
+
+/** The concrete values each non-custom preset maps to. Used by
+ *  `applyPerformancePreset` in the reactive store and by tests. */
+export const PRESET_VALUES: Record<Exclude<PerfPreset, "custom">, Omit<PerformanceSettings, "preset">> = {
+  quality: {
+    threeEnabled: true,
+    threeQuality: "minimal",
+    pauseWhenHidden: true,
+    animationsEnabled: true,
+    glassEffects: true,
+    streamingRender: "smooth",
+    editorLiveSync: true,
+    fileTreeRefresh: "immediate",
+  },
+  balanced: {
+    threeEnabled: true,
+    threeQuality: "medium",
+    pauseWhenHidden: true,
+    animationsEnabled: true,
+    glassEffects: true,
+    streamingRender: "smooth",
+    editorLiveSync: true,
+    fileTreeRefresh: "throttled",
+  },
+  performance: {
+    threeEnabled: false,
+    threeQuality: "low",
+    pauseWhenHidden: true,
+    animationsEnabled: false,
+    glassEffects: false,
+    streamingRender: "throttled",
+    editorLiveSync: false,
+    fileTreeRefresh: "throttled",
   },
 };
 
@@ -210,6 +298,36 @@ function safeTelemetry(value: unknown): Settings["telemetry"] {
   };
 }
 
+/** Sanitize the persisted performance config — validate enums and booleans
+ *  so a corrupt blob falls back to defaults (the "quality" preset).
+ *  `legacyThreeEnabled` carries the v8 top-level `threeEnabled` so an
+ *  upgrading user's choice is preserved when no performance block exists. */
+function safePerformance(value: unknown, legacyThreeEnabled?: boolean): Settings["performance"] {
+  const obj = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const d = DEFAULT_SETTINGS.performance;
+  const safeEnum = <T extends string>(v: unknown, allowed: readonly string[], def: T): T =>
+    typeof v === "string" && allowed.includes(v) ? (v as T) : def;
+  // If the blob has an explicit performance.threeEnabled, use it; otherwise
+  // fall back to the legacy top-level threeEnabled (if present), then default.
+  const threeEnabled =
+    typeof obj.threeEnabled === "boolean"
+      ? obj.threeEnabled
+      : typeof legacyThreeEnabled === "boolean"
+        ? legacyThreeEnabled
+        : d.threeEnabled;
+  return {
+    preset: safeEnum(obj.preset, PERF_PRESETS, d.preset),
+    threeEnabled,
+    threeQuality: safeEnum(obj.threeQuality, THREE_QUALITIES, d.threeQuality),
+    pauseWhenHidden: typeof obj.pauseWhenHidden === "boolean" ? obj.pauseWhenHidden : d.pauseWhenHidden,
+    animationsEnabled: typeof obj.animationsEnabled === "boolean" ? obj.animationsEnabled : d.animationsEnabled,
+    glassEffects: typeof obj.glassEffects === "boolean" ? obj.glassEffects : d.glassEffects,
+    streamingRender: safeEnum(obj.streamingRender, STREAMING_RENDERS, d.streamingRender),
+    editorLiveSync: typeof obj.editorLiveSync === "boolean" ? obj.editorLiveSync : d.editorLiveSync,
+    fileTreeRefresh: safeEnum(obj.fileTreeRefresh, FILE_TREE_REFRESHES, d.fileTreeRefresh),
+  };
+}
+
 /**
  * Migrate a parsed JSON blob (of unknown shape / age) to the current schema.
  * Only known fields are copied; everything else falls back to defaults, so a
@@ -217,6 +335,12 @@ function safeTelemetry(value: unknown): Settings["telemetry"] {
  */
 export function migrateBlob(raw: unknown): Settings {
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  // Compute performance first so the legacy top-level `threeEnabled` can
+  // mirror `performance.threeEnabled` (they must stay in sync).
+  const performance = safePerformance(
+    obj.performance,
+    typeof obj.threeEnabled === "boolean" ? obj.threeEnabled : undefined,
+  );
   return {
     schemaVersion: SCHEMA_VERSION,
     theme: safeTheme(obj.theme),
@@ -250,8 +374,7 @@ export function migrateBlob(raw: unknown): Settings {
         : obj.selectedModelId === null
           ? null
           : DEFAULT_SETTINGS.selectedModelId,
-    threeEnabled:
-      typeof obj.threeEnabled === "boolean" ? obj.threeEnabled : DEFAULT_SETTINGS.threeEnabled,
+    threeEnabled: performance.threeEnabled,
     openrouterApiKey:
       typeof obj.openrouterApiKey === "string"
         ? obj.openrouterApiKey
@@ -292,6 +415,7 @@ export function migrateBlob(raw: unknown): Settings {
         ? obj.singleShotMode
         : DEFAULT_SETTINGS.singleShotMode,
     telemetry: safeTelemetry(obj.telemetry),
+    performance,
   };
 }
 

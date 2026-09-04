@@ -95,10 +95,10 @@ test("migrateBlob: singleShotMode accepts auto/always/never, else default", () =
   assert.equal(migrateBlob({}).singleShotMode, "auto");
 });
 
-test("migrateBlob: schema version is 8", () => {
-  assert.equal(SCHEMA_VERSION, 8);
-  assert.equal(migrateBlob({}).schemaVersion, 8);
-  assert.equal(migrateBlob({ schemaVersion: 3 }).schemaVersion, 8);
+test("migrateBlob: schema version is 9", () => {
+  assert.equal(SCHEMA_VERSION, 9);
+  assert.equal(migrateBlob({}).schemaVersion, 9);
+  assert.equal(migrateBlob({ schemaVersion: 3 }).schemaVersion, 9);
 });
 
 test("migrateBlob: mode accepts editor/agent/stats/monitoring, else defaults to editor", () => {
@@ -214,4 +214,97 @@ test("migrateBlob: telemetry config clamps invalid values to defaults", () => {
   assert.equal(out.telemetry.maxRecentRequests, 2000);
   assert.equal(out.telemetry.writeDebounceMs, 1500);
   assert.equal(out.telemetry.trendDays, 14);
+});
+
+// ── Performance settings (schema v9) ──────────────────────────────────────
+
+test("migrateBlob: performance config defaults to performance preset", () => {
+  const out = migrateBlob({});
+  assert.deepEqual(out.performance, DEFAULT_SETTINGS.performance);
+  assert.equal(out.performance.preset, "performance");
+  assert.equal(out.performance.threeEnabled, false);
+  assert.equal(out.performance.threeQuality, "minimal");
+  assert.equal(out.performance.pauseWhenHidden, true);
+  assert.equal(out.performance.animationsEnabled, false);
+  assert.equal(out.performance.glassEffects, false);
+  assert.equal(out.performance.streamingRender, "throttled");
+  assert.equal(out.performance.editorLiveSync, false);
+  assert.equal(out.performance.fileTreeRefresh, "throttled");
+});
+
+test("migrateBlob: performance config preserves valid values", () => {
+  const out = migrateBlob({
+    performance: {
+      preset: "performance",
+      threeEnabled: false,
+      threeQuality: "low",
+      pauseWhenHidden: true,
+      animationsEnabled: false,
+      glassEffects: false,
+      streamingRender: "throttled",
+      editorLiveSync: false,
+      fileTreeRefresh: "throttled",
+    },
+  });
+  assert.equal(out.performance.preset, "performance");
+  assert.equal(out.performance.threeEnabled, false);
+  assert.equal(out.performance.threeQuality, "low");
+  assert.equal(out.performance.pauseWhenHidden, true);
+  assert.equal(out.performance.animationsEnabled, false);
+  assert.equal(out.performance.glassEffects, false);
+  assert.equal(out.performance.streamingRender, "throttled");
+  assert.equal(out.performance.editorLiveSync, false);
+  assert.equal(out.performance.fileTreeRefresh, "throttled");
+});
+
+test("migrateBlob: performance config sanitizes corrupt values to defaults", () => {
+  const out = migrateBlob({
+    performance: {
+      preset: "ultra",
+      threeEnabled: "yes",
+      threeQuality: "ultra",
+      pauseWhenHidden: 1,
+      animationsEnabled: null,
+      glassEffects: "true",
+      streamingRender: "fast",
+      editorLiveSync: 0,
+      fileTreeRefresh: "lazy",
+    },
+  });
+  assert.equal(out.performance.preset, "performance");
+  assert.equal(out.performance.threeEnabled, false);
+  assert.equal(out.performance.threeQuality, "minimal");
+  assert.equal(out.performance.pauseWhenHidden, true);
+  assert.equal(out.performance.animationsEnabled, false);
+  assert.equal(out.performance.glassEffects, false);
+  assert.equal(out.performance.streamingRender, "throttled");
+  assert.equal(out.performance.editorLiveSync, false);
+  assert.equal(out.performance.fileTreeRefresh, "throttled");
+});
+
+test("migrateBlob: legacy top-level threeEnabled=false carries into performance", () => {
+  // A v8 blob with threeEnabled: false but no performance block.
+  const out = migrateBlob({ threeEnabled: false });
+  assert.equal(out.threeEnabled, false);
+  assert.equal(out.performance.threeEnabled, false);
+  // No performance block → defaults (performance preset).
+  assert.equal(out.performance.preset, "performance");
+});
+
+test("migrateBlob: explicit performance.threeEnabled wins over legacy threeEnabled", () => {
+  const out = migrateBlob({
+    threeEnabled: false,
+    performance: { threeEnabled: true },
+  });
+  assert.equal(out.performance.threeEnabled, true);
+  assert.equal(out.threeEnabled, true); // top-level mirrors performance
+});
+
+test("migrateBlob: top-level threeEnabled mirrors performance.threeEnabled", () => {
+  const out = migrateBlob({
+    threeEnabled: true, // legacy says on
+    performance: { threeEnabled: false }, // new block says off
+  });
+  assert.equal(out.performance.threeEnabled, false);
+  assert.equal(out.threeEnabled, false); // top-level mirrors performance, not legacy
 });

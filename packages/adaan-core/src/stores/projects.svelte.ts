@@ -511,10 +511,11 @@ class ProjectsStore {
     const isActiveChat = this.activeId === project.id && project.activeChatId === chat.id;
 
     // Apply the event to the correct message array:
-    // - Active chat: chatStore.messages (what the UI reads from)
+    // - Active chat: route through chatStore.handleEvent so the throttled
+    //   streaming buffer (if enabled) batches delta re-renders.
     // - Background chat: chat.messages (silently updated)
     if (isActiveChat) {
-      applyChatEvent(chatStore.messages, assistantId, event);
+      chatStore.handleEvent(assistantId, event);
       // Sync chat.messages to chatStore.messages so the chat's history is
       // preserved when the user switches away. This also ensures they point
       // to the same reactive proxy for future mutations.

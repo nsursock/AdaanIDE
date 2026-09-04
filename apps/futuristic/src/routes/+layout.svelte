@@ -12,6 +12,13 @@
 
   let { children } = $props();
 
+  // Toggle the `perf-lite` class on <html> when performance settings change.
+  // This gates glass blur, infinite animations, and heavy glow effects in app.css.
+  $effect(() => {
+    const lite = settingsStore.perfLite;
+    document.documentElement.classList.toggle("perf-lite", lite);
+  });
+
   onMount(() => {
     themeStore.init();
     settingsStore.init();
@@ -54,7 +61,7 @@
   });
 </script>
 
-<ThreeBackground enabled={settingsStore.settings.threeEnabled} />
+<ThreeBackground enabled={settingsStore.settings.performance.threeEnabled} />
 
 <div class="app-container relative z-10 h-screen w-screen flex flex-col overflow-hidden">
   {@render children()}
