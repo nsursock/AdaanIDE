@@ -188,38 +188,59 @@
   }
 </script>
 
-<section class="relative h-full w-full flex flex-col items-center justify-center px-6 py-10 overflow-hidden" style="background: var(--color-bg);">
+<section class="relative h-full w-full flex items-center justify-center px-6 py-10 overflow-hidden" style="background: var(--color-bg);">
   <!-- Perspective grid floor -->
   <div class="grid-floor"></div>
   <!-- Vignette for depth -->
   <div class="vignette"></div>
 
-  <div class="relative z-10 w-full max-w-2xl flex flex-col items-center text-center">
-    <!-- Kicker -->
-    <div class="hero-kicker neon-flicker text-xs tracking-[0.35em] uppercase mb-4" style="color: var(--color-accent);">
-      <span style="opacity:0.5">⟨</span>&nbsp; v1.0 · neural coding environment &nbsp;<span style="opacity:0.5">⟩</span>
+  <div class="relative z-10 w-full max-w-5xl flex flex-col lg:flex-row items-center lg:items-stretch gap-8 lg:gap-10">
+    <!-- Left: branding column -->
+    <div class="flex-1 flex flex-col items-center lg:items-start text-center lg:text-left justify-center min-w-0">
+      <!-- Kicker -->
+      <div class="hero-kicker neon-flicker text-xs tracking-[0.35em] uppercase mb-4" style="color: var(--color-accent);">
+        <span style="opacity:0.5">⟨</span>&nbsp; v1.0 · neural coding environment &nbsp;<span style="opacity:0.5">⟩</span>
+      </div>
+
+      <!-- Title with chromatic aberration on hover -->
+      <h1 class="hero-title-glitch text-6xl sm:text-7xl font-black tracking-tight mb-4" data-text="AdaanIDE">
+        <span class="hero-title">AdaanIDE</span>
+      </h1>
+
+      <!-- Typewriter tagline -->
+      <p class="hero-tagline text-lg opacity-80 mb-7 h-7" style="color: var(--color-text);">
+        <span class={!typingDone ? "caret-blink" : ""}>{typed}</span>
+      </p>
+
+      <!-- Feature pills -->
+      <div class="flex flex-wrap items-center justify-center lg:justify-start gap-2 mb-9 max-w-lg">
+        {#each features as f (f.label)}
+          <span class="feature-pill">
+            <f.icon size={14} style="color: var(--color-accent);" />
+            {f.label}
+          </span>
+        {/each}
+      </div>
+
+      <!-- Stats row -->
+      <div class="grid grid-cols-3 gap-6 w-full max-w-xs">
+        <div class="stat-tile">
+          <div class="stat-value">{statModels}+</div>
+          <div class="stat-label">Models</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-value">{statThemes}</div>
+          <div class="stat-label">Themes</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-value">{statTools}</div>
+          <div class="stat-label">Tools</div>
+        </div>
+      </div>
     </div>
 
-    <!-- Title with chromatic aberration on hover -->
-    <h1 class="hero-title-glitch text-6xl sm:text-7xl font-black tracking-tight mb-4" data-text="AdaanIDE">
-      <span class="hero-title">AdaanIDE</span>
-    </h1>
-
-    <!-- Typewriter tagline -->
-    <p class="hero-tagline text-lg opacity-80 mb-7 h-7" style="color: var(--color-text);">
-      <span class={!typingDone ? "caret-blink" : ""}>{typed}</span>
-    </p>
-
-    <!-- Feature pills -->
-    <div class="flex flex-wrap items-center justify-center gap-2 mb-9 max-w-lg">
-      {#each features as f (f.label)}
-        <span class="feature-pill">
-          <f.icon size={14} style="color: var(--color-accent);" />
-          {f.label}
-        </span>
-      {/each}
-    </div>
-
+    <!-- Right: console panel (workspace picker) -->
+    <div class="flex-1 flex flex-col justify-center w-full max-w-xl min-w-0">
     <!-- Console panel: workspace picker -->
     <div bind:this={consoleEl} class="console-panel w-full p-6 sm:p-7 text-left">
       <div class="scan-line"></div>
@@ -446,21 +467,6 @@
         <div class="mt-4 text-xs font-mono" style="color: var(--color-error);">! {error}</div>
       {/if}
     </div>
-
-    <!-- Stats row -->
-    <div class="grid grid-cols-3 gap-6 mt-8 w-full max-w-sm">
-      <div class="stat-tile">
-        <div class="stat-value">{statModels}+</div>
-        <div class="stat-label">Models</div>
-      </div>
-      <div class="stat-tile">
-        <div class="stat-value">{statThemes}</div>
-        <div class="stat-label">Themes</div>
-      </div>
-      <div class="stat-tile">
-        <div class="stat-value">{statTools}</div>
-        <div class="stat-label">Tools</div>
-      </div>
     </div>
   </div>
 </section>

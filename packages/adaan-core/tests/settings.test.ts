@@ -95,10 +95,10 @@ test("migrateBlob: singleShotMode accepts auto/always/never, else default", () =
   assert.equal(migrateBlob({}).singleShotMode, "auto");
 });
 
-test("migrateBlob: schema version is 7", () => {
-  assert.equal(SCHEMA_VERSION, 7);
-  assert.equal(migrateBlob({}).schemaVersion, 7);
-  assert.equal(migrateBlob({ schemaVersion: 3 }).schemaVersion, 7);
+test("migrateBlob: schema version is 8", () => {
+  assert.equal(SCHEMA_VERSION, 8);
+  assert.equal(migrateBlob({}).schemaVersion, 8);
+  assert.equal(migrateBlob({ schemaVersion: 3 }).schemaVersion, 8);
 });
 
 test("migrateBlob: mode accepts editor/agent/stats/monitoring, else defaults to editor", () => {

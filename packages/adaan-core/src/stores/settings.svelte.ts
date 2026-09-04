@@ -89,6 +89,10 @@ class SettingsStore {
     this.update({ chatWidth: n });
   }
 
+  setAgentChatWidth(n: number) {
+    this.update({ agentChatWidth: n });
+  }
+
   setTerminalHeight(n: number) {
     this.update({ terminalHeight: n });
   }

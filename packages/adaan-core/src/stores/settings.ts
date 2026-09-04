@@ -7,7 +7,7 @@ import type { ThemeId } from "../types.js";
 import { DEFAULT_THEME, THEME_IDS } from "../themes.js";
 
 /** Bump when the persisted shape changes; `migrateBlob` always rewrites to this. */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /** Top-level app mode — which workspace shell is active.
  *  - `editor`: the classic 3-pane IDE (file tree · editor · chat + terminal)
@@ -46,6 +46,8 @@ export interface Settings {
   mode: AppMode;
   sidebarWidth: number;
   chatWidth: number;
+  /** Width of the agent chat panel in agent mode (independent from editor chatWidth). */
+  agentChatWidth: number;
   /** Height of the bottom terminal pane in px (when open). */
   terminalHeight: number;
   /** Whether the bottom terminal pane is shown. */
@@ -123,6 +125,7 @@ export const DEFAULT_SETTINGS: Settings = {
   mode: "editor",
   sidebarWidth: DEFAULT_SIDEBAR_W,
   chatWidth: DEFAULT_CHAT_W,
+  agentChatWidth: DEFAULT_CHAT_W,
   terminalHeight: DEFAULT_TERMINAL_H,
   terminalEnabled: false,
   terminalMode: "full",
@@ -225,6 +228,11 @@ export function migrateBlob(raw: unknown): Settings {
     ),
     chatWidth: clamp(
       typeof obj.chatWidth === "number" ? obj.chatWidth : DEFAULT_SETTINGS.chatWidth,
+      CHAT_MIN,
+      CHAT_MAX,
+    ),
+    agentChatWidth: clamp(
+      typeof obj.agentChatWidth === "number" ? obj.agentChatWidth : DEFAULT_SETTINGS.agentChatWidth,
       CHAT_MIN,
       CHAT_MAX,
     ),

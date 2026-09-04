@@ -25,6 +25,7 @@
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
   import ModeRail from "$lib/components/ModeRail.svelte";
   import StatsView from "$lib/components/StatsView.svelte";
+  import GitHubPanel from "$lib/components/GitHubPanel.svelte";
   import {
     IconCode,
     IconMessage,
@@ -51,19 +52,29 @@
   // drag-end. Local state holds the live value during a drag.
   let sidebarWidth = $state(settingsStore.settings.sidebarWidth);
   let chatWidth = $state(settingsStore.settings.chatWidth);
+  let agentChatWidth = $state(settingsStore.settings.agentChatWidth);
   let terminalHeight = $state(settingsStore.settings.terminalHeight);
 
   // --- Drag handling --------------------------------------------------------
   type DragState =
-    | { which: "sidebar" | "chat"; startX: number; startW: number }
+    | { which: "sidebar" | "chat" | "chat-left"; startX: number; startW: number }
     | { which: "terminal"; startY: number; startH: number }
     | null;
   let drag: DragState = $state(null);
 
-  function startResize(which: "sidebar" | "chat", e: MouseEvent) {
+  function startResize(which: "sidebar" | "chat" | "chat-left", e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    drag = { which, startX: e.clientX, startW: which === "sidebar" ? sidebarWidth : chatWidth };
+    drag = {
+      which,
+      startX: e.clientX,
+      startW:
+        which === "sidebar"
+          ? sidebarWidth
+          : which === "chat-left"
+            ? agentChatWidth
+            : chatWidth,
+    };
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
   }
@@ -88,8 +99,11 @@
     if (drag.which === "sidebar") {
       // Sidebar is on the left — dragging right increases width.
       sidebarWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, drag.startW + delta));
+    } else if (drag.which === "chat-left") {
+      // Agent chat is on the left — dragging right increases width.
+      agentChatWidth = Math.min(CHAT_MAX, Math.max(CHAT_MIN, drag.startW + delta));
     } else {
-      // Chat is on the right — dragging left increases width.
+      // Editor chat is on the right — dragging left increases width.
       chatWidth = Math.min(CHAT_MAX, Math.max(CHAT_MIN, drag.startW - delta));
     }
   }
@@ -98,6 +112,7 @@
     if (!drag) return;
     if (drag.which === "sidebar") settingsStore.setSidebarWidth(sidebarWidth);
     else if (drag.which === "chat") settingsStore.setChatWidth(chatWidth);
+    else if (drag.which === "chat-left") settingsStore.setAgentChatWidth(agentChatWidth);
     else settingsStore.setTerminalHeight(terminalHeight);
     drag = null;
     document.body.style.cursor = "";
@@ -339,10 +354,34 @@
       {#if mode === "stats"}
         <StatsView />
       {:else if mode === "agent"}
-        <div class="mode-placeholder">
-          <IconSparkles size={40} />
-          <div class="mode-placeholder-title">Agent Mode</div>
-          <div class="mode-placeholder-hint">Chat-left · GitHub top-right · Terminal bottom-right. Coming soon.</div>
+        <!-- Agent mode: left chat (resizable), top-right GitHub, bottom-right terminal -->
+        <div class="flex-1 flex overflow-hidden gap-1 p-1" style="background: rgba(var(--bg-deep-rgb), 0.4);">
+          <!-- Left: agent chat (full height, resizable) -->
+          <div class="chat-wrap">
+            <aside
+              class="panel-enter pane pane-bracketed flex flex-col overflow-hidden rounded-lg"
+              style="width: {agentChatWidth}px;"
+            >
+              <ChatPanel {workspaceRoot} onFileChanged={loadTree} />
+            </aside>
+            <button
+              type="button"
+              class="resizer"
+              onmousedown={(e) => startResize("chat-left", e)}
+              tabindex="-1"
+              aria-label="Resize agent chat panel"
+            ></button>
+          </div>
+
+          <!-- Right column: GitHub (top) + Terminal (bottom) -->
+          <div class="flex-1 flex flex-col gap-1 min-w-0">
+            <div class="panel-enter pane pane-bracketed flex flex-col overflow-hidden rounded-lg flex-1 min-h-0">
+              <GitHubPanel {workspaceRoot} />
+            </div>
+            <div class="panel-enter pane pane-bracketed flex flex-col overflow-hidden rounded-lg flex-shrink-0" style="height: {terminalHeight}px;">
+              <TerminalPane {workspaceRoot} height={terminalHeight} />
+            </div>
+          </div>
         </div>
       {:else if mode === "monitoring"}
         <div class="mode-placeholder">
