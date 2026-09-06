@@ -31,6 +31,14 @@
     IconUpload,
     IconListCheck,
     IconFileText,
+    IconListDetails,
+    IconColumns,
+    IconBroadcast,
+    IconChartBar,
+    IconArrowRight,
+    IconTrendingDown,
+    IconTrendingUp,
+    IconPoint,
   } from "@tabler/icons-svelte";
   import { settingsStore } from "@adaan/core";
   import type {
@@ -86,6 +94,22 @@
   /** Monitoring view mode: "reviews" = per-config review management,
    *  "work" = consolidated "Work to Do" across all configs. */
   let monitorView = $state<"reviews" | "work">("reviews");
+  /** Task-list visual layout inside the Reviews tab. Persisted to localStorage. */
+  type ReviewViewMode = "cards" | "kanban" | "theater" | "tracker" | "scorecard" | "timeline";
+  const VIEW_MODES: { id: ReviewViewMode; label: string; icon: typeof IconHistory }[] = [
+    { id: "cards", label: "Cards", icon: IconListDetails },
+    { id: "kanban", label: "Kanban", icon: IconColumns },
+    { id: "theater", label: "Theater", icon: IconBroadcast },
+    { id: "tracker", label: "Tracker", icon: IconListCheck },
+    { id: "scorecard", label: "Scorecard", icon: IconChartBar },
+    { id: "timeline", label: "Timeline", icon: IconHistory },
+  ];
+  let reviewViewMode = $state<ReviewViewMode>(
+    (typeof localStorage !== "undefined" && (localStorage.getItem("adaan.reviewViewMode") as ReviewViewMode)) || "cards",
+  );
+  $effect(() => {
+    if (typeof localStorage !== "undefined") localStorage.setItem("adaan.reviewViewMode", reviewViewMode);
+  });
   /** Upload analysis mode: paste raw reviewer outputs and run only the judge. */
   let uploadMode = $state(false);
   /** Pasted reviewer outputs for upload mode — one entry per reviewer. */
@@ -102,6 +126,93 @@
 
   let selectedConfig = $derived(configs.find((c) => c.id === selectedConfigId) ?? null);
   let configResults = $derived(results.filter((r) => r.configId === selectedConfigId));
+
+  /** Auto-load the latest complete result when switching to a view that needs tasks. */
+  $effect(() => {
+    if (
+      monitorView === "reviews" &&
+      reviewViewMode !== "cards" &&
+      reviewViewMode !== "timeline" &&
+      !selectedResult &&
+      !running &&
+      configResults.length > 0
+    ) {
+      const latest = configResults.find((r) => r.status === "complete");
+      if (latest) void loadResult(latest.id);
+    }
+  });
+
+  /** Tasks grouped by lens for the theater view. */
+  let tasksByLens = $derived.by(() => {
+    if (!selectedResult) return [] as { lens: string; tasks: any[] }[];
+    const map = new Map<string, any[]>();
+    for (const t of selectedResult.tasks) {
+      for (const l of t.lenses ?? []) {
+        const arr = map.get(l) ?? [];
+        arr.push(t);
+        map.set(l, arr);
+      }
+    }
+    return [...map.entries()].map(([lens, tasks]) => ({ lens, tasks }));
+  });
+
+  /** Per-lens health grade for the scorecard view: A–F based on open task priorities. */
+  let lensGrades = $derived.by(() => {
+    if (!selectedResult) return [] as { lens: string; grade: string; score: number; counts: { P0: number; P1: number; P2: number; P3: number } }[];
+    const map = new Map<string, { P0: number; P1: number; P2: number; P3: number }>();
+    for (const t of selectedResult.tasks) {
+      if (t.resolved) continue;
+      for (const l of t.lenses ?? []) {
+        const c = map.get(l) ?? { P0: 0, P1: 0, P2: 0, P3: 0 };
+        c[t.priority as "P0" | "P1" | "P2" | "P3"]++;
+        map.set(l, c);
+      }
+    }
+    return [...map.entries()].map(([lens, counts]) => {
+      const score = counts.P0 * 4 + counts.P1 * 2 + counts.P2 * 1 + counts.P3 * 0.5;
+      const grade = score === 0 ? "A" : score <= 1.5 ? "A-" : score <= 3 ? "B" : score <= 5 ? "B-" : score <= 8 ? "C" : score <= 12 ? "D" : "F";
+      return { lens, grade, score, counts };
+    }).sort((a, b) => b.score - a.score);
+  });
+
+  /** Run-over-run priority deltas for scorecard/timeline. */
+  let runDeltas = $derived.by(() => {
+    const complete = configResults.filter((r) => r.status === "complete");
+    if (complete.length < 2) return null;
+    const latest = complete[0];
+    const prev = complete[1];
+    return {
+      p0: (latest.p0 ?? 0) - (prev.p0 ?? 0),
+      p1: (latest.p1 ?? 0) - (prev.p1 ?? 0),
+      p2: (latest.p2 ?? 0) - (prev.p2 ?? 0),
+      p3: (latest.p3 ?? 0) - (prev.p3 ?? 0),
+      latest,
+      prev,
+    };
+  });
+
+  /** Sparkline data: P0/P1/P2/P3 counts across recent runs (oldest → newest). */
+  let sparklineData = $derived.by(() => {
+    const complete = configResults.filter((r) => r.status === "complete").slice(0, 20).reverse();
+    return complete.map((r) => ({
+      p0: r.p0 ?? 0, p1: r.p1 ?? 0, p2: r.p2 ?? 0, p3: r.p3 ?? 0,
+      total: (r.p0 ?? 0) + (r.p1 ?? 0) + (r.p2 ?? 0) + (r.p3 ?? 0),
+      id: r.id, date: r.startedAt,
+    }));
+  });
+
+  /** Tracker detail drawer state. */
+  let trackerDetailTask = $state<any>(null);
+
+  /** Scorecard computed values. */
+  let healthScore = $derived.by(() => {
+    const totalAll = taskStats.open + taskStats.resolved;
+    if (totalAll === 0) return 100;
+    return Math.round(100 - (taskStats.p0 * 12 + taskStats.p1 * 6 + taskStats.p2 * 3 + taskStats.p3 * 1) / Math.max(totalAll, 1) * 10);
+  });
+  let netDelta = $derived(runDeltas ? runDeltas.p0 + runDeltas.p1 + runDeltas.p2 + runDeltas.p3 : null);
+  let sparklineMaxVal = $derived(Math.max(...sparklineData.map((d) => d.total), 1));
+  let topP0Tasks = $derived(selectedResult ? selectedResult.tasks.filter((t) => t.priority === "P0" && !t.resolved) : []);
 
   // --- Data loading ----------------------------------------------------------
   async function loadAll() {
@@ -271,6 +382,27 @@
 
   function editConfig(c: ReviewConfig) {
     editing = JSON.parse(JSON.stringify(c));
+  }
+
+  /** Clone a preset into a temp config and immediately run it (timeline composer). */
+  async function clonePresetAndRun(preset: ReviewPreset) {
+    const tempConfig: ReviewConfig = {
+      id: "",
+      name: preset.name,
+      lenses: preset.lenses.map((l) => ({ ...l })),
+      expertise: "top-1%",
+      modelTier: "free",
+      reviewerModels: [],
+      aggregatorModel: "openrouter/auto",
+      intervalValue: 0,
+      intervalUnit: "hours",
+      targetPath: undefined,
+      workspaceRoot: workspaceRoot ?? undefined,
+      createGitHubIssues: false,
+      writeTasksFile: false,
+      enabled: false,
+    };
+    await runReviewNow(tempConfig);
   }
 
   function removeLens(idx: number) {
@@ -1315,6 +1447,24 @@
         </button>
       </div>
 
+      <!-- View-mode switcher (only in Reviews tab) -->
+      {#if monitorView === "reviews"}
+        <div class="view-mode-bar">
+          {#each VIEW_MODES as vm (vm.id)}
+            <button
+              class="view-mode-btn"
+              class:active={reviewViewMode === vm.id}
+              onclick={() => { reviewViewMode = vm.id; }}
+              title="{vm.label} view"
+              aria-pressed={reviewViewMode === vm.id}
+            >
+              <vm.icon size={13} />
+              <span>{vm.label}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+
       {#if error}
         <div class="monitor-error" transition:fade>
           <IconAlertTriangle size={13} /> {error}
@@ -1511,7 +1661,8 @@
           </div>
         {/if}
       {:else}
-      <!-- Reviews tab: table of all review runs with status/details -->
+      {#if reviewViewMode === "cards"}
+      <!-- Cards view: table of all review runs with status/details -->
 
       {#if running}
         <div class="run-progress" transition:slide={{ duration: 300 }}>
@@ -1865,6 +2016,398 @@
             </div>
           {/if}
         {/if}
+      {:else if reviewViewMode === "kanban"}
+        <!-- ===== KANBAN VIEW ===== -->
+        {#if running || backgroundRunning}
+          <div class="run-banner" transition:slide={{ duration: 300 }}>
+            <span class="dot"></span>
+            <span>{runLog || "Running…"}</span>
+            {#if running}<button class="btn btn-xs btn-danger" onclick={cancelRun} disabled={cancelling} style="margin-left:auto;">{#if cancelling}Cancelling…{:else}<IconSquare size={11} /> Cancel{/if}</button>{/if}
+          </div>
+        {/if}
+        {#if !selectedResult && !running}
+          <div class="main-empty" transition:fade>
+            <IconColumns size={32} />
+            <div>{selectedConfig ? `No reviews yet for "${selectedConfig.name}".` : "Select a config on the left."}</div>
+            {#if selectedConfig}<div class="empty-actions"><button class="btn btn-sm btn-primary" onclick={() => runReviewNow(selectedConfig!)} disabled={!workspaceRoot}><IconPlayerPlay size={13} /> Run now</button></div>{/if}
+          </div>
+        {:else if selectedResult}
+          {@const ktasks = selectedResult.tasks}
+          {@const kopen = ktasks.filter((t) => !t.resolved)}
+          {@const kresolved = ktasks.filter((t) => t.resolved)}
+          <div class="kanban-board" transition:fade>
+            {#each ["P0", "P1", "P2", "P3"] as col (col)}
+              {@const colTasks = kopen.filter((t) => t.priority === col)}
+              <div class="kanban-col kanban-{col.toLowerCase()}">
+                <div class="kanban-col-header">
+                  <span class="kanban-col-prio {col.toLowerCase()}">{col}</span>
+                  <span class="kanban-col-count">{colTasks.length}</span>
+                </div>
+                <div class="kanban-col-body">
+                  {#each colTasks as task, i (task.fingerprint ?? i)}
+                    {@const PI = priorityIcon(task.priority)}
+                    <div class="kanban-card {col.toLowerCase()}">
+                      <button class="task-check" onclick={() => toggleTaskResolved(task)} title="Resolve task" aria-label="Resolve task"><IconCheck size={13} /></button>
+                      <div class="kanban-card-issue">{task.issue}</div>
+                      {#if task.fix}<div class="kanban-card-fix">{task.fix}</div>{/if}
+                      <div class="kanban-card-tags">
+                        {#each task.lenses as lens (lens)}<span class="task-lens-tag" title={lensLabel(lens, selectedConfigId)}>{lensEmoji(lens)} {lens}</span>{/each}
+                      </div>
+                      {#if task.githubUrl}<a href={task.githubUrl} target="_blank" rel="noopener" class="gh-badge"><IconBrandGithub size={11} /> linked</a>{/if}
+                    </div>
+                  {/each}
+                  {#if colTasks.length === 0}<div class="kanban-col-empty">—</div>{/if}
+                </div>
+              </div>
+            {/each}
+            <!-- Resolved column -->
+            <div class="kanban-col kanban-resolved">
+              <div class="kanban-col-header">
+                <span class="kanban-col-prio resolved"><IconCircleCheck size={13} /> Resolved</span>
+                <span class="kanban-col-count">{kresolved.length}</span>
+              </div>
+              <div class="kanban-col-body">
+                {#each kresolved as task, i (task.fingerprint ?? i)}
+                  <div class="kanban-card resolved">
+                    <button class="task-check checked" onclick={() => toggleTaskResolved(task)} title="Reopen task" aria-label="Reopen task"><IconCircleCheck size={14} /></button>
+                    <div class="kanban-card-issue">{task.issue}</div>
+                  </div>
+                {/each}
+                {#if kresolved.length === 0}<div class="kanban-col-empty">No resolved tasks</div>{/if}
+              </div>
+            </div>
+          </div>
+          <div class="kanban-run-info">
+            {fmtDate(selectedResult.startedAt)} · {taskStats.open} open · {taskStats.resolved} resolved
+            {#if selectedResult.estimatedCost != null && selectedResult.estimatedCost > 0}· <IconCoin size={11} /> {fmtCost(selectedResult.estimatedCost)}{/if}
+          </div>
+        {/if}
+
+      {:else if reviewViewMode === "theater"}
+        <!-- ===== THEATER VIEW ===== -->
+        {#if running || backgroundRunning}
+          <div class="theater-stage" transition:fade>
+            <div class="theater-banner">
+              <span class="dot"></span>
+              <span>{runLog || "Running…"}</span>
+              <div class="theater-banner-right">
+                <button class="btn btn-xs btn-danger" onclick={cancelRun} disabled={cancelling}>{#if cancelling}Cancelling…{:else}<IconSquare size={11} /> Cancel{/if}</button>
+              </div>
+            </div>
+            {#if reviewerCards.length > 0}
+              <div class="theater-grid">
+                {#each reviewerCards as card (card.model + "-" + card.index)}
+                  <div class="theater-card {card.status}" class:aggregator={card.isAggregator}>
+                    <div class="theater-card-head">
+                      {#if card.status === "running"}<IconRefresh size={14} class="spin" />
+                      {:else if card.status === "done"}<IconCheck size={14} />
+                      {:else}<IconAlertTriangle size={14} />{/if}
+                      <span class="theater-card-model">{card.isAggregator ? "Aggregator" : modelLabel(card.model)}</span>
+                      {#if card.isAggregator}<span class="theater-card-sub">{modelLabel(card.model)}</span>{/if}
+                      <span class="theater-card-status">{card.status}</span>
+                    </div>
+                    <div class="theater-card-text">
+                      {#if card.isAggregator}{aggregatorReasoning || "(producing JSON output…)"}{:else}{reviewerTexts[card.model] ?? ""}{/if}
+                      {#if card.status === "running"}<span class="caret-blink"></span>{/if}
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <div class="theater-waiting">{runPhase === "context" ? "Gathering context…" : runPhase === "cost" ? "Estimating cost…" : "Starting committee…"}</div>
+            {/if}
+          </div>
+        {:else if selectedResult}
+          <!-- Post-run: tasks grouped by lens -->
+          <div class="theater-results" transition:fade>
+            <div class="theater-results-header">
+              <div class="result-title">Committee verdict · {fmtDate(selectedResult.startedAt)}</div>
+              <div class="result-meta">{taskStats.open} open · {taskStats.resolved} resolved · {selectedResult.reviewerModels?.length ?? 0} reviewers</div>
+            </div>
+            {#if tasksByLens.length === 0}
+              <div class="main-empty"><IconBroadcast size={32} /><div>This run produced no tasks.</div></div>
+            {:else}
+          <div class="theater-lens-list">
+            {#each tasksByLens as group (group.lens)}
+              <details class="theater-lens-section" open>
+                <summary class="theater-lens-summary">
+                  <span class="theater-lens-emoji">{lensEmoji(group.lens)}</span>
+                  <span class="theater-lens-name">{lensLabel(group.lens, selectedConfigId)}</span>
+                  <span class="theater-lens-count">{group.tasks.filter((t) => !t.resolved).length} open</span>
+                  <IconChevronDown size={14} class="theater-chevron" />
+                </summary>
+                <div class="theater-lens-tasks">
+                  {#each group.tasks as task, i (task.fingerprint ?? i)}
+                    {@const PI = priorityIcon(task.priority)}
+                    <div class="theater-task {task.priority.toLowerCase()} {task.resolved ? "resolved" : ""}">
+                      <button class="task-check {task.resolved ? "checked" : ""}" onclick={() => toggleTaskResolved(task)} title={task.resolved ? "Reopen" : "Resolve"} aria-label={task.resolved ? "Reopen" : "Resolve"}>{#if task.resolved}<IconCircleCheck size={14} />{:else}<IconCheck size={13} />{/if}</button>
+                      <span class="task-prio {task.priority.toLowerCase()}"><PI size={12} /> {task.priority}</span>
+                      <span class="theater-task-issue">{task.issue}</span>
+                      {#if task.fix}<span class="theater-task-fix">→ {task.fix}</span>{/if}
+                    </div>
+                  {/each}
+                </div>
+              </details>
+            {/each}
+          </div>
+        {/if}
+          </div>
+        {:else}
+          <div class="main-empty" transition:fade>
+            <IconBroadcast size={32} />
+            <div>{selectedConfig ? `No reviews yet for "${selectedConfig.name}".` : "Select a config on the left."}</div>
+            {#if selectedConfig}<div class="empty-actions"><button class="btn btn-sm btn-primary" onclick={() => runReviewNow(selectedConfig!)} disabled={!workspaceRoot}><IconPlayerPlay size={13} /> Run now</button></div>{/if}
+          </div>
+        {/if}
+
+      {:else if reviewViewMode === "tracker"}
+        <!-- ===== TRACKER VIEW ===== -->
+        {#if running || backgroundRunning}
+          <div class="run-banner" transition:slide={{ duration: 300 }}>
+            <span class="dot"></span>
+            <span>{runLog || "Running…"}</span>
+            {#if running}<button class="btn btn-xs btn-danger" onclick={cancelRun} disabled={cancelling} style="margin-left:auto;">{#if cancelling}Cancelling…{:else}<IconSquare size={11} /> Cancel{/if}</button>{/if}
+          </div>
+        {/if}
+        {#if !selectedResult && !running}
+          <div class="main-empty" transition:fade>
+            <IconListCheck size={32} />
+            <div>{selectedConfig ? `No reviews yet for "${selectedConfig.name}".` : "Select a config on the left."}</div>
+            {#if selectedConfig}<div class="empty-actions"><button class="btn btn-sm btn-primary" onclick={() => runReviewNow(selectedConfig!)} disabled={!workspaceRoot}><IconPlayerPlay size={13} /> Run now</button></div>{/if}
+          </div>
+        {:else if selectedResult}
+          <div class="tracker-layout" transition:fade>
+            <div class="tracker-list">
+              <div class="tracker-filters">
+                <select class="task-filter-select" bind:value={filterPriority} aria-label="Filter by priority">
+                  <option value="all">All priorities</option><option value="P0">P0</option><option value="P1">P1</option><option value="P2">P2</option><option value="P3">P3</option>
+                </select>
+                <select class="task-filter-select" bind:value={filterLens} aria-label="Filter by lens">
+                  <option value="all">All lenses</option>
+                  {#each availableLenses as lens (lens)}<option value={lens}>{lensShortLabel(lens)}</option>{/each}
+                </select>
+                <select class="task-filter-select" bind:value={filterStatus} aria-label="Filter by status">
+                  <option value="open">Open</option><option value="resolved">Resolved</option><option value="all">All</option>
+                </select>
+                <div class="task-search-group">
+                  <IconSearch size={13} class="search-icon" />
+                  <input class="task-search-input" type="text" placeholder="Search…" bind:value={taskSearch} />
+                </div>
+                <span class="task-count-badge">{displayTasks.length} / {selectedResult.tasks.length}</span>
+              </div>
+              <div class="tracker-rows">
+                {#each displayTasks as task, i (task.fingerprint ?? i)}
+                  {@const PI = priorityIcon(task.priority)}
+                  <div
+                    class="tracker-row {task.priority.toLowerCase()} {task.resolved ? "resolved" : ""} {trackerDetailTask === task ? "selected" : ""}"
+                    role="button" tabindex="0"
+                    onclick={() => { trackerDetailTask = task; if (!task.resolved) creatingIssueIdx ?? null; }}
+                    onkeydown={(e) => { if (e.key === "Enter") trackerDetailTask = task; }}
+                  >
+                    <button class="task-check {task.resolved ? "checked" : ""}" onclick={(e) => { e.stopPropagation(); toggleTaskResolved(task); }} title={task.resolved ? "Reopen" : "Resolve"} aria-label={task.resolved ? "Reopen" : "Resolve"}>{#if task.resolved}<IconCircleCheck size={14} />{:else}<IconCheck size={13} />{/if}</button>
+                    <span class="task-prio {task.priority.toLowerCase()}"><PI size={12} /> {task.priority}</span>
+                    <span class="tracker-row-issue">{task.issue}</span>
+                    <span class="tracker-row-lenses">{#each task.lenses as lens (lens)}{lensEmoji(lens)}{/each}</span>
+                    {#if task.githubUrl}<a href={task.githubUrl} target="_blank" rel="noopener" class="gh-badge" onclick={(e) => e.stopPropagation()}><IconBrandGithub size={11} /></a>{/if}
+                  </div>
+                {/each}
+                {#if displayTasks.length === 0}<div class="task-empty"><IconFilter size={20} /><div>No tasks match the current filters.</div></div>{/if}
+              </div>
+            </div>
+            {#if trackerDetailTask}
+              {@const dt = trackerDetailTask}
+              {@const DPI = priorityIcon(dt.priority)}
+              <div class="tracker-detail" transition:fly={{ x: 30, duration: 300 }}>
+                <div class="tracker-detail-header">
+                  <span class="result-title">Task detail</span>
+                  <button class="icon-btn" onclick={() => { trackerDetailTask = null; }} aria-label="Close detail"><IconX size={15} /></button>
+                </div>
+                <div class="tracker-detail-body">
+                  <div class="tracker-detail-prio"><span class="task-prio {dt.priority.toLowerCase()}"><DPI size={14} /> {dt.priority}</span> {#if dt.resolved}<span class="status-tag complete"><IconCircleCheck size={11} /> resolved</span>{/if}</div>
+                  <div class="tracker-detail-issue">{dt.issue}</div>
+                  {#if dt.mainFinding}<div class="tracker-detail-section"><span class="field-label">Main finding</span><div>{dt.mainFinding}</div></div>{/if}
+                  {#if dt.fix}<div class="tracker-detail-section"><span class="field-label">Fix</span><div>{dt.fix}</div></div>{/if}
+                  {#if dt.impact}<div class="tracker-detail-section"><span class="field-label">Impact</span><div>{dt.impact}</div></div>{/if}
+                  <div class="tracker-detail-section"><span class="field-label">Lenses</span><div class="tracker-detail-tags">{#each dt.lenses as lens (lens)}<span class="task-lens-tag" title={lensLabel(lens, selectedConfigId)}>{lensEmoji(lens)} {lensLabel(lens, selectedConfigId)}</span>{/each}</div></div>
+                  <div class="tracker-detail-section"><span class="field-label">Reviewers</span><div class="rev-chips">{#each dt.reviewers as r (r)}<span class="rev-chip"><i class="rev-dot" style="background: {reviewerDot(friendlyReviewer(r))}"></i>{friendlyReviewer(r)}</span>{/each}</div></div>
+                  <div class="tracker-detail-actions">
+                    <button class="btn btn-sm {dt.resolved ? "" : "btn-ghost"}" onclick={() => toggleTaskResolved(dt)}>{#if dt.resolved}Reopen{:else}Resolve{/if}</button>
+                    {#if dt.githubUrl}<a href={dt.githubUrl} target="_blank" rel="noopener" class="btn btn-sm"><IconBrandGithub size={13} /> View issue</a>{:else if !dt.resolved}<button class="btn btn-sm btn-primary" onclick={() => createIssue(selectedResult!.id, selectedResult!.tasks.indexOf(dt))} disabled={creatingIssueIdx !== null}><IconBrandGithub size={13} /> Create issue</button>{/if}
+                  </div>
+                </div>
+              </div>
+            {:else}
+              <div class="tracker-detail-empty">
+                <IconPoint size={24} />
+                <div>Select a task to view details</div>
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+      {:else if reviewViewMode === "scorecard"}
+        <!-- ===== SCORECARD VIEW ===== -->
+        {#if running || backgroundRunning}
+          <div class="run-banner" transition:slide={{ duration: 300 }}>
+            <span class="dot"></span>
+            <span>{runLog || "Running…"}</span>
+            {#if running}<button class="btn btn-xs btn-danger" onclick={cancelRun} disabled={cancelling} style="margin-left:auto;">{#if cancelling}Cancelling…{:else}<IconSquare size={11} /> Cancel{/if}</button>{/if}
+          </div>
+        {/if}
+        {#if !selectedResult && !running}
+          <div class="main-empty" transition:fade>
+            <IconChartBar size={32} />
+            <div>{selectedConfig ? `No reviews yet for "${selectedConfig.name}".` : "Select a config on the left."}</div>
+            {#if selectedConfig}<div class="empty-actions"><button class="btn btn-sm btn-primary" onclick={() => runReviewNow(selectedConfig!)} disabled={!workspaceRoot}><IconPlayerPlay size={13} /> Run now</button></div>{/if}
+          </div>
+        {:else if selectedResult}
+          <div class="scorecard" transition:fade>
+            <!-- Health score -->
+            <div class="scorecard-hero">
+              <div class="scorecard-score {healthScore >= 75 ? "good" : healthScore >= 50 ? "ok" : "bad"}">
+                <span class="scorecard-score-num">{healthScore}</span>
+                <span class="scorecard-score-max">/100</span>
+              </div>
+              <div class="scorecard-trend">
+                {#if netDelta !== null}
+                  <span class="scorecard-delta {netDelta < 0 ? "good" : netDelta > 0 ? "bad" : ""}">
+                    {#if netDelta < 0}<IconTrendingDown size={16} /> {netDelta} tasks{:else if netDelta > 0}<IconTrendingUp size={16} /> +{netDelta} tasks{:else}no change{/if}
+                  </span>
+                  <span class="scorecard-delta-sub">vs {fmtDate(runDeltas!.prev.startedAt)}</span>
+                {/if}
+              </div>
+            </div>
+
+            <!-- Sparkline -->
+            {#if sparklineData.length > 1}
+              <div class="scorecard-sparkline" transition:fade>
+                <div class="sparkline-label">Task count trend ({sparklineData.length} runs)</div>
+                <div class="sparkline-chart">
+                  {#each sparklineData as d (d.id)}
+                    <div class="sparkline-bar" title="{fmtDate(d.date)}: {d.total} tasks (P0:{d.p0} P1:{d.p1} P2:{d.p2} P3:{d.p3})" style="height: {Math.max((d.total / sparklineMaxVal) * 100, 3)}%">
+                      <div class="sparkline-seg p0" style="flex: {d.p0}"></div>
+                      <div class="sparkline-seg p1" style="flex: {d.p1}"></div>
+                      <div class="sparkline-seg p2" style="flex: {d.p2}"></div>
+                      <div class="sparkline-seg p3" style="flex: {d.p3}"></div>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
+            <!-- Lens grades -->
+            {#if lensGrades.length > 0}
+              <div class="scorecard-grades" transition:fade>
+                <div class="sparkline-label">Lens health grades</div>
+                <div class="grade-grid">
+                  {#each lensGrades as g (g.lens)}
+                    <div class="grade-card {g.grade.startsWith("A") ? "good" : g.grade.startsWith("B") ? "ok" : "bad"}">
+                      <span class="grade-emoji">{lensEmoji(g.lens)}</span>
+                      <span class="grade-label">{lensLabel(g.lens, selectedConfigId)}</span>
+                      <span class="grade-letter">{g.grade}</span>
+                      <span class="grade-detail">P0:{g.counts.P0} P1:{g.counts.P1} P2:{g.counts.P2} P3:{g.counts.P3}</span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
+            <!-- Top P0 issues -->
+            {#if topP0Tasks.length > 0}
+              <div class="scorecard-top-issues" transition:fade>
+                <div class="sparkline-label">Top P0 issues ({topP0Tasks.length})</div>
+                {#each topP0Tasks.slice(0, 5) as task, i (task.fingerprint ?? i)}
+                  <div class="scorecard-issue-row p0">
+                    <button class="task-check" onclick={() => toggleTaskResolved(task)} title="Resolve" aria-label="Resolve"><IconCheck size={13} /></button>
+                    <IconFlame size={13} class="p0-icon" />
+                    <span class="scorecard-issue-text">{task.issue}</span>
+                    <span class="scorecard-issue-lenses">{#each task.lenses as lens (lens)}{lensEmoji(lens)}{/each}</span>
+                  </div>
+                {/each}
+                {#if topP0Tasks.length > 5}<div class="scorecard-more">+{topP0Tasks.length - 5} more P0 — switch to Cards/Tracker for full list</div>{/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+      {:else if reviewViewMode === "timeline"}
+        <!-- ===== TIMELINE VIEW ===== -->
+        {#if running || backgroundRunning}
+          <div class="run-banner" transition:slide={{ duration: 300 }}>
+            <span class="dot"></span>
+            <span>{runLog || "Running…"}</span>
+            {#if running}<button class="btn btn-xs btn-danger" onclick={cancelRun} disabled={cancelling} style="margin-left:auto;">{#if cancelling}Cancelling…{:else}<IconSquare size={11} /> Cancel{/if}</button>{/if}
+          </div>
+        {/if}
+        <div class="timeline-feed" transition:fade>
+          {#if configResults.length === 0 && !running}
+            <div class="main-empty">
+              <IconHistory size={32} />
+              <div>{selectedConfig ? `No reviews yet for "${selectedConfig.name}".` : "Select a config on the left."}</div>
+            </div>
+          {:else}
+            {#each configResults as r (r.id)}
+              <div class="timeline-msg {r.status}" transition:fly={{ y: 16, duration: 300, easing: cubicInOut }}>
+                <div class="timeline-msg-avatar">
+                  {#if r.status === "running"}<IconRefresh size={16} class="spin" />
+                  {:else if r.status === "complete"}<IconCircleCheck size={16} />
+                  {:else}<IconAlertTriangle size={16} />{/if}
+                </div>
+                <div class="timeline-msg-body">
+                  <div class="timeline-msg-header">
+                    <span class="timeline-msg-date">{fmtDate(r.startedAt)}</span>
+                    <span class="timeline-msg-trigger">{r.triggeredBy}</span>
+                    <span class="timeline-msg-models">{modelLabel(r.aggregatorModel)}</span>
+                    {#if r.status === "complete"}
+                      <span class="timeline-msg-stats">
+                        {#if r.p0 > 0}<span class="stat-pill p0">{r.p0} P0</span>{/if}
+                        {#if r.p1 > 0}<span class="stat-pill p1">{r.p1} P1</span>{/if}
+                        {#if r.p2 > 0}<span class="stat-pill p2">{r.p2} P2</span>{/if}
+                        {#if r.p3 > 0}<span class="stat-pill p3">{r.p3} P3</span>{/if}
+                      </span>
+                    {/if}
+                    {#if r.estimatedCost != null && r.estimatedCost > 0}<span class="cost-badge"><IconCoin size={10} /> {fmtCost(r.estimatedCost)}</span>{/if}
+                  </div>
+                  {#if r.status === "complete" && r.taskCount > 0}
+                    <details class="timeline-msg-details">
+                      <summary class="timeline-msg-summary">View {r.taskCount} task{r.taskCount === 1 ? "" : "s"}</summary>
+                      {#if selectedResultId === r.id && selectedResult}
+                        <div class="timeline-msg-tasks">
+                          {#each selectedResult.tasks.filter((t) => !t.resolved).slice(0, 10) as task, i (task.fingerprint ?? i)}
+                            <div class="timeline-task {task.priority.toLowerCase()}">
+                              <button class="task-check" onclick={() => toggleTaskResolved(task)} title="Resolve" aria-label="Resolve"><IconCheck size={13} /></button>
+                              <span class="task-prio {task.priority.toLowerCase()}">{task.priority}</span>
+                              <span class="timeline-task-issue">{task.issue}</span>
+                            </div>
+                          {/each}
+                          {#if selectedResult.tasks.filter((t) => !t.resolved).length > 10}
+                            <div class="timeline-more">+{selectedResult.tasks.filter((t) => !t.resolved).length - 10} more — switch to Cards/Tracker for full list</div>
+                          {/if}
+                        </div>
+                      {:else}
+                        <button class="btn btn-xs btn-ghost timeline-load-btn" onclick={() => loadResult(r.id)}>Load tasks</button>
+                      {/if}
+                    </details>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+            <!-- Composer row -->
+            <div class="timeline-composer">
+              {#if selectedConfig}
+                <button class="btn btn-sm btn-primary" onclick={() => runReviewNow(selectedConfig!)} disabled={!workspaceRoot || running}>
+                  <IconPlayerPlay size={13} /> Run "{selectedConfig.name}"
+                </button>
+              {/if}
+              {#each presets.slice(0, 4) as p (p.id)}
+                <button class="btn btn-xs btn-ghost" onclick={() => clonePresetAndRun(p)} disabled={!workspaceRoot || running} title={p.description}>
+                  {p.name}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
       {/if}
     </div>
   </main>
@@ -3764,9 +4307,459 @@
   :global(html.perf-lite) .run-banner .dot { animation: none; }
   :global(html.perf-lite) .reviewer-card .spin { animation: none; }
   :global(html.perf-lite) .reviewer-text .caret-blink::after { animation: none; }
+  :global(html.perf-lite) .theater-card .spin { animation: none; }
+  :global(html.perf-lite) .theater-card-text .caret-blink::after { animation: none; }
   @media (prefers-reduced-motion: reduce) {
     .run-banner .dot { animation: none; }
     .reviewer-card .spin { animation: none; }
     .reviewer-text .caret-blink::after { animation: none; }
+    .theater-card .spin { animation: none; }
+    .theater-card-text .caret-blink::after { animation: none; }
+  }
+
+  /* ===== View-mode switcher ===== */
+  .view-mode-bar {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.3rem 0.5rem;
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+    overflow-x: auto;
+  }
+  .view-mode-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.25rem 0.55rem;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--color-muted);
+    font-size: 0.6875rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .view-mode-btn:hover { color: var(--color-text); background: rgba(var(--surface-1-rgb), 0.4); }
+  .view-mode-btn.active {
+    color: var(--color-accent);
+    border-color: var(--color-border-accent);
+    background: rgba(var(--accent-rgb), 0.1);
+  }
+
+  /* ===== Kanban view ===== */
+  .kanban-board {
+    display: flex;
+    gap: 0.5rem;
+    overflow-x: auto;
+    padding: 0.5rem;
+    flex: 1;
+    min-height: 0;
+  }
+  .kanban-col {
+    display: flex;
+    flex-direction: column;
+    min-width: 200px;
+    flex: 1;
+    max-width: 280px;
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--bg-deep-rgb), 0.25);
+  }
+  .kanban-col-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .kanban-col-prio { display: flex; align-items: center; gap: 0.25rem; }
+  .kanban-col-prio.p0 { color: var(--color-error); }
+  .kanban-col-prio.p1 { color: var(--color-warning); }
+  .kanban-col-prio.p2 { color: var(--color-success); }
+  .kanban-col-prio.p3 { color: var(--color-muted); }
+  .kanban-col-prio.resolved { color: var(--color-muted); }
+  .kanban-col-count {
+    font-size: 0.625rem;
+    padding: 0.05rem 0.35rem;
+    border-radius: 999px;
+    background: rgba(var(--surface-1-rgb), 0.6);
+    color: var(--color-muted);
+  }
+  .kanban-col-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.3rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .kanban-card {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.3rem;
+    padding: 0.4rem 0.5rem;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--surface-1-rgb), 0.5);
+    font-size: 0.6875rem;
+    cursor: default;
+  }
+  .kanban-card.p0 { border-left: 3px solid var(--color-error); }
+  .kanban-card.p1 { border-left: 3px solid var(--color-warning); }
+  .kanban-card.p2 { border-left: 3px solid var(--color-success); }
+  .kanban-card.p3 { border-left: 3px solid var(--color-muted); }
+  .kanban-card.resolved { opacity: 0.5; }
+  .kanban-card .task-check { flex-shrink: 0; margin-top: 1px; }
+  .kanban-card-issue { flex: 1; min-width: 0; font-weight: 500; line-height: 1.3; }
+  .kanban-card-fix { flex-basis: 100%; font-size: 0.625rem; color: var(--color-muted); line-height: 1.3; }
+  .kanban-card-tags { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 0.2rem; }
+  .kanban-col-empty { text-align: center; color: var(--color-muted); font-size: 0.625rem; padding: 0.8rem; }
+  .kanban-run-info {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.6875rem;
+    color: var(--color-muted);
+    border-top: 1px solid var(--color-border);
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  /* ===== Theater view ===== */
+  .theater-stage { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem; flex: 1; min-height: 0; }
+  .theater-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--accent-rgb), 0.08);
+    font-size: 0.75rem;
+  }
+  .theater-banner-right { margin-left: auto; }
+  .theater-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 0.5rem;
+    overflow-y: auto;
+    flex: 1;
+  }
+  .theater-card {
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--surface-1-rgb), 0.5);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 120px;
+  }
+  .theater-card.running { border-color: var(--color-border-accent); box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.15); }
+  .theater-card.done { border-color: rgba(var(--success-rgb), 0.3); }
+  .theater-card.error { border-color: rgba(var(--error-rgb), 0.4); }
+  .theater-card.aggregator { border-style: dashed; }
+  .theater-card-head {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 0.6875rem;
+    font-weight: 600;
+  }
+  .theater-card-model { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .theater-card-sub { font-size: 0.5625rem; color: var(--color-muted); }
+  .theater-card-status {
+    font-size: 0.5625rem;
+    text-transform: uppercase;
+    padding: 0.05rem 0.3rem;
+    border-radius: 4px;
+    background: rgba(var(--surface-1-rgb), 0.6);
+    color: var(--color-muted);
+  }
+  .theater-card-text {
+    padding: 0.4rem 0.5rem;
+    font-size: 0.625rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    overflow-y: auto;
+    flex: 1;
+    max-height: 200px;
+    color: var(--color-text);
+    opacity: 0.85;
+  }
+  .theater-waiting {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    color: var(--color-muted);
+    font-size: 0.75rem;
+  }
+  .theater-results { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.5rem; flex: 1; overflow-y: auto; }
+  .theater-results-header { padding: 0 0.2rem; }
+  .theater-lens-list { display: flex; flex-direction: column; gap: 0.3rem; }
+  .theater-lens-section {
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--surface-1-rgb), 0.3);
+    overflow: hidden;
+  }
+  .theater-lens-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem 0.6rem;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 600;
+    list-style: none;
+  }
+  .theater-lens-summary::-webkit-details-marker { display: none; }
+  .theater-lens-emoji { font-size: 0.875rem; }
+  .theater-lens-count {
+    margin-left: auto;
+    font-size: 0.625rem;
+    padding: 0.05rem 0.35rem;
+    border-radius: 999px;
+    background: rgba(var(--surface-1-rgb), 0.6);
+    color: var(--color-muted);
+  }
+  .theater-chevron { color: var(--color-muted); transition: transform 0.2s; }
+  details[open] .theater-chevron { transform: rotate(180deg); }
+  .theater-lens-tasks { padding: 0.2rem 0.4rem 0.4rem; display: flex; flex-direction: column; gap: 0.2rem; }
+  .theater-task {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.35rem;
+    padding: 0.3rem 0.4rem;
+    border-radius: 6px;
+    background: rgba(var(--bg-deep-rgb), 0.2);
+    font-size: 0.6875rem;
+  }
+  .theater-task.resolved { opacity: 0.5; }
+  .theater-task-issue { flex: 1; min-width: 0; line-height: 1.3; }
+  .theater-task-fix { flex-basis: 100%; font-size: 0.625rem; color: var(--color-muted); margin-left: 1.5rem; }
+
+  /* ===== Tracker view ===== */
+  .tracker-layout { display: flex; gap: 0.5rem; flex: 1; min-height: 0; padding: 0.3rem; }
+  .tracker-list { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.3rem; overflow: hidden; }
+  .tracker-filters {
+    display: flex;
+    gap: 0.3rem;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 0.3rem;
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--bg-deep-rgb), 0.2);
+  }
+  .tracker-rows { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 0.15rem; }
+  .tracker-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    font-size: 0.6875rem;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .tracker-row:hover { background: rgba(var(--surface-1-rgb), 0.4); }
+  .tracker-row.selected { border-color: var(--color-border-accent); background: rgba(var(--accent-rgb), 0.08); }
+  .tracker-row.resolved { opacity: 0.5; }
+  .tracker-row.p0 { border-left: 3px solid var(--color-error); }
+  .tracker-row.p1 { border-left: 3px solid var(--color-warning); }
+  .tracker-row.p2 { border-left: 3px solid var(--color-success); }
+  .tracker-row.p3 { border-left: 3px solid var(--color-muted); }
+  .tracker-row-issue { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tracker-row-lenses { display: flex; gap: 0.1rem; font-size: 0.625rem; flex-shrink: 0; }
+  .tracker-detail {
+    width: 320px;
+    flex-shrink: 0;
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--surface-1-rgb), 0.4);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .tracker-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .tracker-detail-body { padding: 0.5rem 0.6rem; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.75rem; }
+  .tracker-detail-prio { display: flex; align-items: center; gap: 0.4rem; }
+  .tracker-detail-issue { font-weight: 600; font-size: 0.8125rem; line-height: 1.3; }
+  .tracker-detail-section { display: flex; flex-direction: column; gap: 0.2rem; }
+  .tracker-detail-section .field-label { font-size: 0.625rem; }
+  .tracker-detail-tags { display: flex; flex-wrap: wrap; gap: 0.2rem; }
+  .tracker-detail-actions { display: flex; gap: 0.3rem; margin-top: 0.3rem; }
+  .tracker-detail-empty {
+    width: 320px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem;
+    color: var(--color-muted);
+    font-size: 0.75rem;
+    border-radius: 8px;
+    border: 1px dashed var(--color-border);
+  }
+
+  /* ===== Scorecard view ===== */
+  .scorecard { display: flex; flex-direction: column; gap: 0.6rem; padding: 0.6rem; overflow-y: auto; flex: 1; }
+  .scorecard-hero {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.8rem 1rem;
+    border-radius: 10px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--surface-1-rgb), 0.3);
+  }
+  .scorecard-score { display: flex; align-items: baseline; gap: 0.15rem; }
+  .scorecard-score-num { font-size: 2.5rem; font-weight: 700; line-height: 1; }
+  .scorecard-score-max { font-size: 1rem; color: var(--color-muted); }
+  .scorecard-score.good { color: var(--color-success); }
+  .scorecard-score.ok { color: var(--color-warning); }
+  .scorecard-score.bad { color: var(--color-error); }
+  .scorecard-trend { display: flex; flex-direction: column; gap: 0.1rem; }
+  .scorecard-delta { display: flex; align-items: center; gap: 0.25rem; font-size: 0.8125rem; font-weight: 600; }
+  .scorecard-delta.good { color: var(--color-success); }
+  .scorecard-delta.bad { color: var(--color-error); }
+  .scorecard-delta-sub { font-size: 0.625rem; color: var(--color-muted); }
+  .sparkline-label { font-size: 0.6875rem; font-weight: 600; color: var(--color-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem; }
+  .scorecard-sparkline { padding: 0.5rem; border-radius: 8px; border: 1px solid var(--color-border); background: rgba(var(--bg-deep-rgb), 0.2); }
+  .sparkline-chart { display: flex; align-items: flex-end; gap: 2px; height: 60px; }
+  .sparkline-bar {
+    flex: 1;
+    min-width: 4px;
+    display: flex;
+    flex-direction: column-reverse;
+    border-radius: 3px 3px 0 0;
+    overflow: hidden;
+    transition: height 0.3s;
+  }
+  .sparkline-seg { min-height: 1px; }
+  .sparkline-seg.p0 { background: var(--color-error); }
+  .sparkline-seg.p1 { background: var(--color-warning); }
+  .sparkline-seg.p2 { background: var(--color-success); }
+  .sparkline-seg.p3 { background: var(--color-muted); opacity: 0.5; }
+  .scorecard-grades { padding: 0.5rem; border-radius: 8px; border: 1px solid var(--color-border); background: rgba(var(--bg-deep-rgb), 0.2); }
+  .grade-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.4rem; }
+  .grade-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+    padding: 0.4rem;
+    border-radius: 6px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--surface-1-rgb), 0.3);
+    font-size: 0.625rem;
+  }
+  .grade-card.good { border-color: rgba(var(--success-rgb), 0.3); }
+  .grade-card.ok { border-color: rgba(var(--warning-rgb), 0.3); }
+  .grade-card.bad { border-color: rgba(var(--error-rgb), 0.3); }
+  .grade-emoji { font-size: 1rem; }
+  .grade-label { font-weight: 600; text-align: center; line-height: 1.2; }
+  .grade-letter { font-size: 1.125rem; font-weight: 700; }
+  .grade-card.good .grade-letter { color: var(--color-success); }
+  .grade-card.ok .grade-letter { color: var(--color-warning); }
+  .grade-card.bad .grade-letter { color: var(--color-error); }
+  .grade-detail { color: var(--color-muted); font-size: 0.5625rem; }
+  .scorecard-top-issues { padding: 0.5rem; border-radius: 8px; border: 1px solid var(--color-border); background: rgba(var(--bg-deep-rgb), 0.2); }
+  .scorecard-issue-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.4rem;
+    border-radius: 6px;
+    background: rgba(var(--error-rgb), 0.05);
+    font-size: 0.6875rem;
+    margin-bottom: 0.2rem;
+  }
+  .scorecard-issue-row .p0-icon { color: var(--color-error); flex-shrink: 0; }
+  .scorecard-issue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .scorecard-issue-lenses { display: flex; gap: 0.1rem; flex-shrink: 0; }
+  .scorecard-more { font-size: 0.625rem; color: var(--color-muted); padding: 0.2rem 0.4rem; }
+
+  /* ===== Timeline view ===== */
+  .timeline-feed { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.6rem; overflow-y: auto; flex: 1; }
+  .timeline-msg {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.6rem;
+    border-radius: 10px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--surface-1-rgb), 0.3);
+  }
+  .timeline-msg.running { border-color: var(--color-border-accent); box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.1); }
+  .timeline-msg.error { border-color: rgba(var(--error-rgb), 0.3); }
+  .timeline-msg-avatar {
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(var(--accent-rgb), 0.1);
+    color: var(--color-accent);
+  }
+  .timeline-msg.complete .timeline-msg-avatar { color: var(--color-success); background: rgba(var(--success-rgb), 0.1); }
+  .timeline-msg.error .timeline-msg-avatar { color: var(--color-error); background: rgba(var(--error-rgb), 0.1); }
+  .timeline-msg-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+  .timeline-msg-header { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; font-size: 0.6875rem; }
+  .timeline-msg-date { font-weight: 600; }
+  .timeline-msg-trigger { color: var(--color-muted); text-transform: capitalize; }
+  .timeline-msg-models { color: var(--color-muted); }
+  .timeline-msg-stats { display: flex; gap: 0.2rem; }
+  .timeline-msg-details { margin-top: 0.2rem; }
+  .timeline-msg-summary {
+    cursor: pointer;
+    font-size: 0.6875rem;
+    color: var(--color-accent);
+    padding: 0.2rem 0;
+  }
+  .timeline-msg-tasks { display: flex; flex-direction: column; gap: 0.15rem; padding: 0.2rem 0; }
+  .timeline-task {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.25rem 0.4rem;
+    border-radius: 4px;
+    background: rgba(var(--bg-deep-rgb), 0.2);
+    font-size: 0.625rem;
+  }
+  .timeline-task.p0 { border-left: 2px solid var(--color-error); }
+  .timeline-task.p1 { border-left: 2px solid var(--color-warning); }
+  .timeline-task.p2 { border-left: 2px solid var(--color-success); }
+  .timeline-task.p3 { border-left: 2px solid var(--color-muted); }
+  .timeline-task-issue { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .timeline-more { font-size: 0.5625rem; color: var(--color-muted); padding: 0.15rem 0.4rem; }
+  .timeline-load-btn { margin: 0.2rem 0; }
+  .timeline-composer {
+    display: flex;
+    gap: 0.3rem;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 0.5rem;
+    border-radius: 8px;
+    border: 1px dashed var(--color-border);
+    background: rgba(var(--bg-deep-rgb), 0.15);
+    margin-top: 0.3rem;
   }
 </style>
