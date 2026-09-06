@@ -328,7 +328,7 @@ class ChatStore {
       }
       // Still clear the status line on the first token (cheap, not a re-render of content).
       if (event.type === "text.delta") {
-        applyChatEvent(this.messages, assistantId, { type: "status", data: { message: "" } });
+        applyChatEvent(this.messages, assistantId, { type: "status", sessionId: event.sessionId, timestamp: Date.now(), data: { message: "" } });
       }
       return;
     }

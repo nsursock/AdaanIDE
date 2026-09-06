@@ -82,6 +82,8 @@ export interface ModelInfo {
   };
   toolsCapable: boolean;
   free: boolean;
+  /** Parameter size classification (e.g. "4-7B", "25-35B", "70B+"). */
+  paramSize?: string;
 }
 
 /** A model served by a local OpenAI-compatible runtime (Ollama, Rapid-MLX,

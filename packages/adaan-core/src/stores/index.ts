@@ -3,7 +3,7 @@ export { themeStore } from "./theme.svelte.js";
 export { workspaceStore } from "./workspace.svelte.js";
 export { chatStore } from "./chat.svelte.js";
 export { projectsStore } from "./projects.svelte.js";
-export type { Settings, AppMode, PerformanceSettings, PerfPreset, ThreeQuality, StreamingRender, FileTreeRefresh } from "./settings.js";
+export type { Settings, AppMode, PerformanceSettings, MonitoringSettings } from "./settings.js";
 export type { OpenTab, PatchSignal, PendingFileChange } from "./workspace.svelte.js";
 export type { ChatMessageEntry, TimelineSegment } from "./chat.svelte.js";
 export type { ProjectEntry, PendingApproval, ChatSession } from "./projects.svelte.js";

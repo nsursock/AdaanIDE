@@ -12,6 +12,7 @@ import {
   type AppMode,
   type PerformanceSettings,
   type PerfPreset,
+  type MonitoringSettings,
 } from "./settings.js";
 
 const isBrowser = typeof window !== "undefined";
@@ -150,6 +151,10 @@ class SettingsStore {
 
   setSingleLocalModel(b: boolean) {
     this.update({ singleLocalModel: b });
+  }
+
+  setMonitoringEnabled(b: boolean) {
+    this.update({ monitoring: { ...this.settings.monitoring, enabled: b } });
   }
 
   /** Update a single telemetry tuning parameter and push it to the server. */

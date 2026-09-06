@@ -171,6 +171,11 @@ export async function fetchOpenRouterCatalog(): Promise<ModelGroups | null> {
 
 const workspaces: Map<string, Workspace> = new Map();
 
+/** The most recently used workspace root — any API call that touches a
+ *  workspace updates it. Used by background jobs (review scheduler) that run
+ *  without a client request to tell them which project is active. */
+let lastActiveWorkspaceRoot: string | undefined;
+
 export function getWorkspace(rootPath: string): Workspace {
   const resolved = rootPath;
   let ws = workspaces.get(resolved);
@@ -178,7 +183,12 @@ export function getWorkspace(rootPath: string): Workspace {
     ws = new Workspace(resolved);
     workspaces.set(resolved, ws);
   }
+  lastActiveWorkspaceRoot = resolved;
   return ws;
+}
+
+export function getActiveWorkspaceRoot(): string | undefined {
+  return lastActiveWorkspaceRoot;
 }
 
 export function registerWorkspace(ws: Workspace) {

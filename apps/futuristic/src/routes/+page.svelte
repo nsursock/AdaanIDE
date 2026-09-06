@@ -25,12 +25,12 @@
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
   import ModeRail from "$lib/components/ModeRail.svelte";
   import StatsView from "$lib/components/StatsView.svelte";
+  import ReviewPanel from "$lib/components/ReviewPanel.svelte";
   import GitHubPanel from "$lib/components/GitHubPanel.svelte";
   import {
     IconCode,
     IconMessage,
     IconFolder,
-    IconCube,
     IconHome,
     IconTerminal2,
     IconSparkles,
@@ -140,8 +140,8 @@
     projectsStore.openProject(root, name);
     await loadTree();
     requestAnimationFrame(() => {
-      gsap.from(".panel-enter", { y: 15, opacity: 0, duration: 0.5, stagger: 0.08, ease: "power3.out" });
-      gsap.from(".app-bar", { y: -20, opacity: 0, duration: 0.5, ease: "power3.out" });
+      gsap.from(".panel-enter", { y: 15, opacity: 0, duration: 0.5, stagger: 0.08, ease: "power3.out", clearProps: "opacity" });
+      gsap.from(".app-bar", { y: -20, opacity: 0, duration: 0.5, ease: "power3.out", clearProps: "opacity" });
     });
   }
 
@@ -156,7 +156,7 @@
       projectsStore.clearTreeStale(entry.rootPath);
     }
     requestAnimationFrame(() => {
-      gsap.from(".panel-enter", { y: 12, opacity: 0, duration: 0.4, stagger: 0.06, ease: "power3.out" });
+      gsap.from(".panel-enter", { y: 12, opacity: 0, duration: 0.4, stagger: 0.06, ease: "power3.out", clearProps: "opacity" });
     });
   }
 
@@ -384,11 +384,7 @@
           </div>
         </div>
       {:else if mode === "monitoring"}
-        <div class="mode-placeholder">
-          <IconCube size={40} />
-          <div class="mode-placeholder-title">Monitoring Mode</div>
-          <div class="mode-placeholder-hint">A committee of agents reviews the code every N hours and critiques the project. Coming soon.</div>
-        </div>
+        <ReviewPanel {workspaceRoot} />
       {:else}
         <!-- Editor mode: classic 3-pane layout -->
         <div class="flex-1 flex overflow-hidden gap-1 p-1" style="background: rgba(var(--bg-deep-rgb), 0.4);">

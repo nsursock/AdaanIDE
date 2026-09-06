@@ -436,6 +436,48 @@ export class OpenRouterProvider implements LLMProvider {
       throw new Error("No response body from OpenRouter");
     }
 
+    // Some models (notably Cohere on the free tier) don't support streaming
+    // even when `stream: true` is requested. OpenRouter returns a regular JSON
+    // response (Content-Type: application/json) instead of an SSE stream. The
+    // SSE parser below would silently produce no text in that case, so detect
+    // it here and emit the content as a single text.delta event.
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!contentType.includes("text/event-stream") && contentType.includes("application/json")) {
+      cleanupTimer();
+      try {
+        const json = await response.json() as any;
+        const choice = json.choices?.[0];
+        const content = choice?.message?.content;
+        if (content) {
+          yield { type: "text.delta", data: { text: content } };
+        }
+        // Emit reasoning if present (some models return it in message).
+        const reasoning = choice?.message?.reasoning ?? choice?.message?.reasoning_content;
+        if (reasoning) {
+          yield { type: "reasoning.delta", data: { text: reasoning } };
+        }
+        // Emit any tool calls.
+        if (choice?.message?.tool_calls) {
+          for (let i = 0; i < choice.message.tool_calls.length; i++) {
+            const tc = choice.message.tool_calls[i];
+            yield { type: "tool_call.start", data: { toolCallId: tc.id ?? "", toolName: tc.function?.name ?? "", index: i } };
+            yield { type: "tool_call.complete", data: { index: i, toolCallId: tc.id ?? "", toolName: tc.function?.name ?? "", arguments: tc.function?.arguments ?? "" } };
+          }
+        }
+        const usage = json.usage ? {
+          inputTokens: json.usage.prompt_tokens ?? 0,
+          outputTokens: json.usage.completion_tokens ?? 0,
+          cachedTokens: json.usage.cached_tokens ?? json.usage.prompt_tokens_details?.cached_tokens ?? 0,
+          reasoningTokens: json.usage.completion_tokens_details?.reasoning_tokens ?? json.usage.reasoning_tokens ?? 0,
+          cost: typeof json.usage.cost === "number" ? json.usage.cost : 0,
+        } : undefined;
+        yield { type: "finish", data: { finishReason: mapFinishReason(choice?.finish_reason ?? "stop"), model: options.model, usage } };
+      } catch (e) {
+        throw new Error(`Failed to parse non-streaming response from ${options.model}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      return;
+    }
+
     // Parse SSE stream
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -447,6 +489,11 @@ export class OpenRouterProvider implements LLMProvider {
     const toolCallAccumulators: Map<number, { id: string; name: string; args: string }> = new Map();
     let finishReason: string = "stop";
     let streamDone = false;
+    let producedText = false;
+    // Accumulate raw data payloads for fallback parsing if the SSE stream
+    // produces no text (some models return content in unexpected fields or
+    // a single non-standard chunk).
+    const rawChunks: string[] = [];
     // OpenRouter reports real token usage in the final SSE chunk (the one
     // with finish_reason, or a trailing empty-choices chunk just before
     // [DONE]). Capture it so the engine can record accurate telemetry
@@ -518,16 +565,38 @@ export class OpenRouterProvider implements LLMProvider {
             break;
           }
 
+          // Accumulate raw data for fallback parsing.
+          rawChunks.push(data);
+
           try {
             const chunk = JSON.parse(data);
+            // Check for OpenRouter error objects in the stream.
+            if (chunk.error) {
+              const errMsg = chunk.error.message ?? chunk.error ?? "Unknown stream error";
+              yield { type: "error", data: { message: `Model ${options.model}: ${errMsg}` } };
+              continue;
+            }
             const choice = chunk.choices?.[0];
-            if (!choice) continue;
+            if (!choice) {
+              // Some models return content at the top level instead of in
+              // choices (e.g. older completion API format).
+              if (chunk.text) {
+                producedText = true;
+                yield { type: "text.delta", data: { text: chunk.text } };
+              }
+              continue;
+            }
 
             const delta = choice.delta;
 
-            // Handle text content
-            if (delta?.content) {
-              yield { type: "text.delta", data: { text: delta.content } };
+            // Handle text content. Some models (e.g. Cohere) send the full
+            // content in `choice.message.content` on the first/only chunk
+            // instead of streaming via `choice.delta.content`. Check all
+            // known field variations.
+            const textContent = delta?.content ?? choice.message?.content ?? choice.text;
+            if (textContent) {
+              producedText = true;
+              yield { type: "text.delta", data: { text: textContent } };
             }
 
             // Handle reasoning/thinking content. OpenRouter streams this
@@ -626,6 +695,51 @@ export class OpenRouterProvider implements LLMProvider {
       cleanupTimer();
     }
 
+    // Fallback: if the SSE stream completed but produced no text (some
+    // models return content in unexpected formats or a single non-standard
+    // chunk), try parsing the accumulated raw data as a single JSON object.
+    if (!producedText && rawChunks.length > 0) {
+      // Try joining all chunks and parsing as one JSON object (non-streaming
+      // response sent as SSE data lines).
+      const joined = rawChunks.join("\n");
+      try {
+        const json = JSON.parse(joined);
+        const choice = json.choices?.[0];
+        const content = choice?.message?.content ?? choice?.delta?.content ?? choice?.text ?? json.text;
+        if (content) {
+          yield { type: "text.delta", data: { text: content } };
+          producedText = true;
+        }
+        if (choice?.message?.reasoning ?? choice?.message?.reasoning_content) {
+          yield { type: "reasoning.delta", data: { text: choice.message.reasoning ?? choice.message.reasoning_content } };
+        }
+        if (json.usage) {
+          const u = json.usage;
+          usage = {
+            inputTokens: u.prompt_tokens ?? 0,
+            outputTokens: u.completion_tokens ?? 0,
+            cachedTokens: u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0,
+            reasoningTokens: u.completion_tokens_details?.reasoning_tokens ?? u.reasoning_tokens ?? 0,
+            cost: typeof u.cost === "number" ? u.cost : 0,
+          };
+        }
+      } catch {
+        // Try each chunk individually — maybe one of them has the content.
+        for (const raw of rawChunks) {
+          try {
+            const chunk = JSON.parse(raw);
+            const choice = chunk.choices?.[0];
+            const content = choice?.message?.content ?? choice?.delta?.content ?? choice?.text ?? chunk.text;
+            if (content) {
+              yield { type: "text.delta", data: { text: content } };
+              producedText = true;
+              break;
+            }
+          } catch { /* skip */ }
+        }
+      }
+    }
+
     // Emit start + complete events for any accumulated tool calls. Start is
     // emitted here (not mid-stream) so the tool name is always complete.
     for (const [idx, acc] of toolCallAccumulators) {
@@ -697,6 +811,7 @@ export class OpenRouterProvider implements LLMProvider {
         },
         toolsCapable,
         free: isFree,
+        paramSize: classifyParamSize(id, model.name ?? id, model.architecture?.num_params),
       };
 
       if (isFree) {
@@ -740,6 +855,68 @@ function mapFinishReason(reason: string): "stop" | "tool_calls" | "length" | "co
     default:
       return "stop";
   }
+}
+
+/**
+ * Classify a model into a parameter-size bucket (e.g. "1-3B", "4-7B",
+ * "8-13B", "14-20B", "25-35B", "40-70B", "70B+"). Uses the OpenRouter
+ * `architecture.num_params` field when available, otherwise falls back to
+ * parsing the model id/name for common size patterns (e.g. "7b", "13b",
+ * "70b", "405b", "moe-235b", "3x7b").
+ */
+function classifyParamSize(id: string, name: string, numParams?: number): string {
+  // 1. Use the explicit num_params field if available.
+  if (typeof numParams === "number" && numParams > 0) {
+    return bucketFromParamCount(numParams);
+  }
+
+  // 2. Parse from id/name — look for patterns like "7b", "13b", "70b", etc.
+  const combined = `${id} ${name}`.toLowerCase();
+
+  // MoE patterns: "moe-235b", "235b-a22b", "3x7b", "8x7b", "8x22b"
+  const moeMatch = combined.match(/(\d+)\s*[x×]\s*(\d+)\s*b/);
+  if (moeMatch) {
+    const total = parseInt(moeMatch[1]) * parseInt(moeMatch[2]);
+    return bucketFromParamCount(total * 1e9);
+  }
+  const moeHyphen = combined.match(/moe[-_]?(\d+)b/);
+  if (moeHyphen) {
+    return bucketFromParamCount(parseInt(moeHyphen[1]) * 1e9);
+  }
+  // "235b-a22b" pattern (total-active)
+  const totalActive = combined.match(/(\d+)b[-_]?a(\d+)b/);
+  if (totalActive) {
+    return bucketFromParamCount(parseInt(totalActive[1]) * 1e9);
+  }
+
+  // Simple "7b", "13b", "70b", "405b" pattern
+  const simpleMatch = combined.match(/(?<![\d.])(\d+(?:\.\d+)?)\s*b\b/);
+  if (simpleMatch) {
+    const billions = parseFloat(simpleMatch[1]);
+    return bucketFromParamCount(billions * 1e9);
+  }
+
+  // "mini", "nano", "tiny" → small
+  if (/mini|nano|tiny|micro/.test(combined)) return "1-3B";
+  // "small" → medium-small
+  if (/small/.test(combined)) return "4-7B";
+
+  return "unknown";
+}
+
+/** Map a raw parameter count (in billions) to a bucket label. */
+function bucketFromParamCount(params: number): string {
+  const b = params / 1e9;
+  if (b < 1) return "<1B";
+  if (b < 3) return "1-3B";
+  if (b < 8) return "4-7B";
+  if (b < 14) return "8-13B";
+  if (b < 21) return "14-20B";
+  if (b < 36) return "25-35B";
+  if (b < 71) return "40-70B";
+  if (b < 120) return "70-120B";
+  if (b < 300) return "120-300B";
+  return "300B+";
 }
 
 /**

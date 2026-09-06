@@ -95,10 +95,10 @@ test("migrateBlob: singleShotMode accepts auto/always/never, else default", () =
   assert.equal(migrateBlob({}).singleShotMode, "auto");
 });
 
-test("migrateBlob: schema version is 9", () => {
-  assert.equal(SCHEMA_VERSION, 9);
-  assert.equal(migrateBlob({}).schemaVersion, 9);
-  assert.equal(migrateBlob({ schemaVersion: 3 }).schemaVersion, 9);
+test("migrateBlob: schema version is 10", () => {
+  assert.equal(SCHEMA_VERSION, 10);
+  assert.equal(migrateBlob({}).schemaVersion, 10);
+  assert.equal(migrateBlob({ schemaVersion: 3 }).schemaVersion, 10);
 });
 
 test("migrateBlob: mode accepts editor/agent/stats/monitoring, else defaults to editor", () => {
@@ -308,3 +308,16 @@ test("migrateBlob: top-level threeEnabled mirrors performance.threeEnabled", () 
   assert.equal(out.performance.threeEnabled, false);
   assert.equal(out.threeEnabled, false); // top-level mirrors performance, not legacy
 });
+
+test("migrateBlob: monitoring block defaults to disabled when absent", () => {
+  const out = migrateBlob({});
+  assert.equal(out.monitoring.enabled, false);
+  assert.equal(DEFAULT_SETTINGS.monitoring.enabled, false);
+});
+
+test("migrateBlob: monitoring.enabled is preserved and coerced to bool", () => {
+  assert.equal(migrateBlob({ monitoring: { enabled: true } }).monitoring.enabled, true);
+  assert.equal(migrateBlob({ monitoring: { enabled: "yes" } }).monitoring.enabled, false);
+  assert.equal(migrateBlob({ monitoring: null }).monitoring.enabled, false);
+});
+

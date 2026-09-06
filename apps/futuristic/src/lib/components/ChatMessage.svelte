@@ -30,7 +30,7 @@
   // only stores a reference (toolCallId) so the live result/error/pending
   // state on the tool-call object is always current.
   function getToolCall(toolCallId: string) {
-    return msg.toolCalls?.find((t) => t.id === toolCallId);
+    return msg.toolCalls?.find((t: { id: string }) => t.id === toolCallId);
   }
 
   function fmtTokens(n: number): string {

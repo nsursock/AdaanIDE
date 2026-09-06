@@ -13,7 +13,7 @@
     { id: "editor", label: "Editor", icon: IconCode, enabled: true },
     { id: "agent", label: "Agent", icon: IconRobot, enabled: true },
     { id: "stats", label: "Stats", icon: IconChartBar, enabled: true },
-    { id: "monitoring", label: "Monitoring", icon: IconEye, enabled: false },
+    { id: "monitoring", label: "Monitoring", icon: IconEye, enabled: true },
   ];
 
   let active = $derived(settingsStore.settings.mode);

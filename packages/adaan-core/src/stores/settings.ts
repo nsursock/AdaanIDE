@@ -7,7 +7,7 @@ import type { ThemeId } from "../types.js";
 import { DEFAULT_THEME, THEME_IDS } from "../themes.js";
 
 /** Bump when the persisted shape changes; `migrateBlob` always rewrites to this. */
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 /** Top-level app mode — which workspace shell is active.
  *  - `editor`: the classic 3-pane IDE (file tree · editor · chat + terminal)
@@ -77,6 +77,14 @@ export interface PerformanceSettings {
   editorLiveSync: boolean;
   /** File-tree refetch strategy after agent writes. */
   fileTreeRefresh: FileTreeRefresh;
+}
+
+/** Monitoring settings — global toggle for the committee review scheduler.
+ *  Individual review configs (lenses, models, intervals) are stored server-side
+ *  in ~/.adaan/reviews.json and managed via the /api/review/* routes. */
+export interface MonitoringSettings {
+  /** Whether the periodic review scheduler is enabled. */
+  enabled: boolean;
 }
 
 export interface Settings {
@@ -154,6 +162,10 @@ export interface Settings {
   };
   /** Performance / graphics settings — game-style quality presets. */
   performance: PerformanceSettings;
+  /** Monitoring: committee code review on a schedule. The review configs
+   *  themselves (lenses, models, intervals) live server-side in
+   *  ~/.adaan/reviews.json; this block only holds the global scheduler toggle. */
+  monitoring: MonitoringSettings;
 }
 
 /** Build the stable key used in `modelAliases` for a discovered local model. */
@@ -201,6 +213,9 @@ export const DEFAULT_SETTINGS: Settings = {
     streamingRender: "throttled",
     editorLiveSync: false,
     fileTreeRefresh: "throttled",
+  },
+  monitoring: {
+    enabled: false,
   },
 };
 
@@ -302,6 +317,14 @@ function safeTelemetry(value: unknown): Settings["telemetry"] {
  *  so a corrupt blob falls back to defaults (the "quality" preset).
  *  `legacyThreeEnabled` carries the v8 top-level `threeEnabled` so an
  *  upgrading user's choice is preserved when no performance block exists. */
+/** Sanitize the persisted monitoring config. */
+function safeMonitoring(value: unknown): Settings["monitoring"] {
+  const obj = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  return {
+    enabled: typeof obj.enabled === "boolean" ? obj.enabled : DEFAULT_SETTINGS.monitoring.enabled,
+  };
+}
+
 function safePerformance(value: unknown, legacyThreeEnabled?: boolean): Settings["performance"] {
   const obj = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
   const d = DEFAULT_SETTINGS.performance;
@@ -416,6 +439,7 @@ export function migrateBlob(raw: unknown): Settings {
         : DEFAULT_SETTINGS.singleShotMode,
     telemetry: safeTelemetry(obj.telemetry),
     performance,
+    monitoring: safeMonitoring(obj.monitoring),
   };
 }
 

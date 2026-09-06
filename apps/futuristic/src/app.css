@@ -1334,7 +1334,7 @@ html, body {
 .delete-confirm-overlay {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: 200;
   background: rgba(var(--shadow-rgb), 0.55);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);

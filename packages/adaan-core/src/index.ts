@@ -39,7 +39,7 @@ export type { DiffOpType, DiffLine, DiffStats } from "./diff.js";
 
 // Stores (client-safe)
 export { themeStore, workspaceStore, chatStore, settingsStore, projectsStore } from "./stores/index.js";
-export type { OpenTab, PatchSignal, PendingFileChange, ChatMessageEntry, TimelineSegment, Settings, AppMode, PerformanceSettings, PerfPreset, ThreeQuality, StreamingRender, FileTreeRefresh, ProjectEntry, PendingApproval, ChatSession } from "./stores/index.js";
+export type { OpenTab, PatchSignal, PendingFileChange, ChatMessageEntry, TimelineSegment, Settings, AppMode, PerformanceSettings, MonitoringSettings, ProjectEntry, PendingApproval, ChatSession } from "./stores/index.js";
 export { applyChatEvent, isTerminalEvent } from "./stores/index.js";
 export {
   SCHEMA_VERSION,
