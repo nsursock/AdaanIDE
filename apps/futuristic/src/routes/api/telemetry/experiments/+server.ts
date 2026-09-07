@@ -25,11 +25,14 @@ const OUTCOME_WEIGHTS: Record<string, number> = {
  * 1.0. A task with status "error" scores 0. This prevents the "model
  * wrote a summary explaining why it failed" failure mode from scoring
  * as 100% success. */
-export async function GET() {
+export async function GET({ url }) {
   try {
     await telemetryStore.load();
+    const root = url.searchParams.get("root") ?? undefined;
     const data = (telemetryStore as any)._data();
-    const tasks = (data.recentTasks ?? []).filter((t: any) => t.experiment);
+    const tasks = (data.recentTasks ?? []).filter(
+      (t: any) => t.experiment && (!root || t.workspaceRoot === root),
+    );
 
     // Group by experiment name → arm → task list.
     const byName = new Map<string, Map<string, any[]>>();

@@ -29,6 +29,8 @@
   import MetricCard from "./MetricCard.svelte";
   import Sparkline from "./Sparkline.svelte";
 
+  let { workspaceRoot = null }: { workspaceRoot?: string | null } = $props();
+
   // --- State ---
   let summary = $state<TelemetrySummary | null>(null);
   let regimes = $state<{ paid: RegimeMetrics; free: RegimeMetrics; local: RegimeMetrics } | null>(null);
@@ -49,6 +51,15 @@
     gsap.from(".stats-header", { y: -20, opacity: 0, duration: 0.5, ease: "power2.out" });
   });
 
+  // Re-fetch when the workspace changes.
+  $effect(() => {
+    if (workspaceRoot) refreshAll();
+  });
+
+  function rootParam(): string {
+    return workspaceRoot ? `?root=${encodeURIComponent(workspaceRoot)}` : "";
+  }
+
   async function refreshAll() {
     loading = true;
     error = null;
@@ -61,13 +72,13 @@
 
   async function loadSummary() {
     try {
-      const res = await fetch("/api/telemetry/summary");
+      const res = await fetch(`/api/telemetry/summary${rootParam()}`);
       if (res.ok) summary = (await res.json()) as TelemetrySummary;
     } catch {}
   }
   async function loadRegimes() {
     try {
-      const res = await fetch("/api/telemetry/regimes?days=7");
+      const res = await fetch(`/api/telemetry/regimes?days=7${workspaceRoot ? `&root=${encodeURIComponent(workspaceRoot)}` : ""}`);
       if (res.ok) {
         const data = await res.json();
         regimes = { paid: data.paid, free: data.free, local: data.local };
@@ -76,7 +87,7 @@
   }
   async function loadModels() {
     try {
-      const res = await fetch("/api/telemetry/models");
+      const res = await fetch(`/api/telemetry/models${rootParam()}`);
       if (res.ok) {
         const data = await res.json();
         models = data.models ?? [];
@@ -85,7 +96,7 @@
   }
   async function loadMatrix() {
     try {
-      const res = await fetch("/api/capability");
+      const res = await fetch(`/api/capability${rootParam()}`);
       if (res.ok) {
         const data = await res.json();
         matrix = data.organic ?? null;
@@ -94,13 +105,13 @@
   }
   async function loadLearnReport() {
     try {
-      const res = await fetch("/api/learn/report");
+      const res = await fetch(`/api/learn/report${rootParam()}`);
       if (res.ok) learnReport = await res.json();
     } catch {}
   }
   async function loadExperiments() {
     try {
-      const res = await fetch("/api/telemetry/experiments");
+      const res = await fetch(`/api/telemetry/experiments${rootParam()}`);
       if (res.ok) {
         const data = await res.json();
         experiments = data.experiments ?? [];
@@ -239,7 +250,7 @@
   <!-- Header -->
   <header class="stats-header">
     <div>
-      <div class="stats-title">Telemetry</div>
+      <div class="stats-title">Telemetry{#if workspaceRoot}<span class="stats-project"> · {workspaceRoot.split("/").pop()}</span>{/if}</div>
       <div class="stats-subtitle">
         {#if today}
           {today.tasks} tasks today · {today.requests} requests · {fmtCost(today.cost)}
@@ -843,6 +854,11 @@
     font-weight: 800;
     letter-spacing: -0.02em;
     color: var(--color-text);
+  }
+  .stats-project {
+    font-weight: 500;
+    color: var(--color-muted);
+    font-size: 0.875rem;
   }
   .stats-subtitle {
     font-size: 0.6875rem;

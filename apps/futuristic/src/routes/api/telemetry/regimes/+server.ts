@@ -15,20 +15,32 @@ export async function GET({ url }) {
   try {
     await telemetryStore.load();
     const days = Math.max(1, Math.min(90, Number(url.searchParams.get("days") ?? "7") || 7));
+    const root = url.searchParams.get("root") ?? undefined;
     const data = (telemetryStore as any)._data();
 
-    // Filter tasks to the requested window.
+    // Filter tasks to the requested window (and workspace if specified).
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - (days - 1));
     const cutoffStr = cutoff.toISOString().slice(0, 10);
-    const tasks = (data.recentTasks ?? []).filter((t: any) => t.day >= cutoffStr);
+    const tasks = (data.recentTasks ?? []).filter((t: any) =>
+      t.day >= cutoffStr && (!root || t.workspaceRoot === root),
+    );
     const taskIds = new Set(tasks.map((t: any) => t.taskId));
     const requests = (data.recentRequests ?? []).filter((r: any) => taskIds.has(r.taskId));
 
-    // Today's uncapped request count for the free-regime quota.
+    // Today's request count for the free-regime quota. When filtering by
+    // workspace, reconstruct from the filtered tasks' requestCount sums
+    // (the global rollup aggregates across all projects).
     const todayStr = new Date().toISOString().slice(0, 10);
-    const todayRollup = data.rollups?.[todayStr];
-    const quotaConsumedToday = todayRollup?.requests ?? 0;
+    let quotaConsumedToday: number;
+    if (root) {
+      quotaConsumedToday = tasks
+        .filter((t: any) => t.day === todayStr)
+        .reduce((s: number, t: any) => s + t.requestCount, 0);
+    } else {
+      const todayRollup = data.rollups?.[todayStr];
+      quotaConsumedToday = todayRollup?.requests ?? 0;
+    }
 
     const regimes: Regime[] = ["paid", "free", "local"];
     const result: Record<string, any> = {};

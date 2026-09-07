@@ -4,12 +4,16 @@ import { telemetryStore, learnedStats, buildReport } from "@adaan/core/server";
 /**
  * Phase 4: Weekly self-report — the audit trail proving the learning works.
  */
-export async function GET() {
+export async function GET({ url }) {
   try {
     await telemetryStore.load();
     await learnedStats.load();
+    const root = url.searchParams.get("root") ?? undefined;
     const rollups = (telemetryStore as any)._data?.()?.rollups ?? {};
-    const tasks = (telemetryStore as any)._data?.()?.recentTasks ?? [];
+    const allTasks = (telemetryStore as any)._data?.()?.recentTasks ?? [];
+    const tasks = root
+      ? allTasks.filter((t: any) => t.workspaceRoot === root)
+      : allTasks;
     const currentDay = new Date().toISOString().slice(0, 10);
     const report = buildReport(rollups, learnedStats, tasks, currentDay);
     return json(report);

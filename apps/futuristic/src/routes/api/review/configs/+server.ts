@@ -6,9 +6,14 @@ import {
   type ReviewConfig,
 } from "@adaan/core/server";
 
-export async function GET() {
+export async function GET({ url }) {
   await reviewStore.load();
-  return json({ configs: reviewStore.getConfigs(), presets: REVIEW_PRESETS });
+  const root = url.searchParams.get("root") ?? undefined;
+  const allConfigs = reviewStore.getConfigs();
+  const configs = root
+    ? allConfigs.filter((c) => c.workspaceRoot === root)
+    : allConfigs;
+  return json({ configs, presets: REVIEW_PRESETS });
 }
 
 export async function POST({ request }) {

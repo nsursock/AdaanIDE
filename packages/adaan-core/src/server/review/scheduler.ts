@@ -1,8 +1,8 @@
 import type { LLMProvider } from "../agent/provider.js";
 import type { Workspace } from "../workspace.js";
 import { reviewStore } from "./store.js";
-import { runReview, registerRun, unregisterRun } from "./runner.js";
-import type { ReviewConfig, ReviewResult } from "./types.js";
+import { reviewRunManager } from "./run-manager.js";
+import type { ReviewConfig } from "./types.js";
 
 /**
  * Server-side scheduler for periodic committee reviews.
@@ -13,6 +13,10 @@ import type { ReviewConfig, ReviewResult } from "./types.js";
  * progress). The scheduler is started once on server init and lives for the
  * lifetime of the process — works in both the browser (SvelteKit Node server)
  * and Electron (which spawns that same server).
+ *
+ * Runs go through the review run manager, so scheduled runs get the same
+ * guarantees as manual ones: sleep prevention (caffeinate), cancellation via
+ * the shared registry, and UI attachability.
  */
 
 const TICK_MS = 60_000;
@@ -101,30 +105,32 @@ export class ReviewScheduler {
       return; // provider/workspace not ready
     }
     this.running.add(config.id);
-    const abortCtrl = new AbortController();
-    const runId = `sched-${config.id}-${Date.now()}`;
-    registerRun(runId, abortCtrl);
     try {
       await reviewStore.touchConfig(config.id, new Date().toISOString());
-      const gen = runReview({
+      // The run manager owns the lifecycle — detached, cancellable, and the
+      // UI can attach to scheduled runs like any other.
+      const { resultId } = reviewRunManager.startReviewRun({
         config,
         workspace,
         provider,
         triggeredBy: "schedule",
-        signal: abortCtrl.signal,
-        onResultUpdate: async (result: ReviewResult) => {
-          await reviewStore.updateResult(result);
-        },
       });
-      // Drain the generator — we don't emit SSE for scheduled runs.
-      for await (const _ev of gen) {
-        void _ev;
+      // Clear the per-config lock when the run terminates.
+      const sub = reviewRunManager.subscribe(resultId);
+      if (sub) {
+        const stop = sub.live((ev) => {
+          if (ev.phase === "complete" || ev.phase === "error" || ev.phase === "cancelled") {
+            this.running.delete(config.id);
+            stop();
+          }
+        });
+        if (sub.done) this.running.delete(config.id);
+      } else {
+        this.running.delete(config.id);
       }
     } catch {
-      // best-effort
-    } finally {
       this.running.delete(config.id);
-      unregisterRun(runId);
+      // best-effort
     }
   }
 }

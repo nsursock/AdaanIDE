@@ -155,10 +155,10 @@ export interface ActiveTask {
   anyToolSuccess: boolean;
   /** Phase A: number of post-edit verification gate failures on this task. */
   verifyGateFailures: number;
-  /** Phase A: whether an auto git checkpoint was taken before the first write. */
-  checkpointTaken: boolean;
   /** Phase A: per-file count of verify gate failures (to cap re-checks at 2). */
   verifyFailuresByFile: Map<string, number>;
+  /** The workspace root path this task ran in (for per-project filtering). */
+  workspaceRoot?: string;
 }
 
 /**
@@ -251,6 +251,7 @@ export class TelemetryStore {
           if (t.fallbacks === undefined) t.fallbacks = 0;
           if (!t.experiment) t.experiment = null;
           if (t.verifyGateFailures === undefined) t.verifyGateFailures = 0;
+          // workspaceRoot is undefined on pre-project-filtering records.
         }
         this.data = {
           version: 1,
@@ -292,6 +293,7 @@ export class TelemetryStore {
       provider?: string;
       requestedModel?: string;
       experiment?: { name: string; arm: string } | null;
+      workspaceRoot?: string;
     } = {},
   ): ActiveTask {
     const taskId = randomUUID();
@@ -335,8 +337,8 @@ export class TelemetryStore {
       lastIterationHadError: false,
       anyToolSuccess: false,
       verifyGateFailures: 0,
-      checkpointTaken: false,
       verifyFailuresByFile: new Map(),
+      workspaceRoot: opts.workspaceRoot,
     };
     this.active.set(taskId, task);
     return task;
@@ -506,6 +508,7 @@ export class TelemetryStore {
       provider: task.provider,
       experiment: task.experiment,
       verifyGateFailures: task.verifyGateFailures,
+      workspaceRoot: task.workspaceRoot,
     };
     this.active.delete(task.taskId);
     this.data.recentTasks.unshift(rec);
@@ -630,6 +633,127 @@ export class TelemetryStore {
       },
       trend,
       recentTasks: this.data.recentTasks.slice(0, 25),
+    };
+  }
+
+  /** Build a DailyRollup from a set of task records that share the same day.
+   *  Used by the workspace-filtered summary (which can't use the global
+   *  rollups since those aggregate across all projects). */
+  private rollupFromTasks(day: string, tasks: TaskRecord[]): DailyRollup {
+    const r = emptyRollup(day);
+    for (const t of tasks) {
+      r.tasks++;
+      if (t.status === "success") r.successfulTasks++;
+      else if (t.status === "error") r.erroredTasks++;
+      else r.cancelledTasks++;
+      r.requests += t.requestCount;
+      r.inputTokens += t.inputTokens;
+      r.outputTokens += t.outputTokens;
+      r.cachedTokens += t.cachedTokens;
+      r.reasoningTokens += t.reasoningTokens;
+      r.cost += t.cost;
+      r.toolCalls += t.toolCalls;
+      r.cacheHits += t.cacheHits;
+      r.filesRead += t.filesRead;
+      r.filesModified += t.filesModified;
+      r.rawContextTokens += t.rawContextTokens;
+      r.actualContextTokens += t.actualContextTokens;
+      r.prunedMessages += t.prunedMessages;
+      r.truncationTokensSaved += t.truncationTokensSaved;
+      r.compactionTokensSaved += t.compactionTokensSaved;
+      r.redundantCallsAvoided += t.redundantCallsAvoided;
+      if (t.snapshotInjected) r.snapshotTasks++;
+      if (t.routedBy === "auto") r.autoRoutedTasks++;
+      r.escalations += t.escalations;
+      if (t.escalations > 0 && t.status === "success") r.escalationSuccesses++;
+      r.retries += t.retries;
+      r.fallbacks += t.fallbacks;
+      r.totalTaskDurationMs += t.durationMs;
+      const ms = r.perModel[t.model] ?? emptyModelStats(t.model);
+      ms.tasks++;
+      if (t.status === "success") ms.taskSuccesses++;
+      ms.requests += t.requestCount;
+      ms.inputTokens += t.inputTokens;
+      ms.outputTokens += t.outputTokens;
+      ms.cachedTokens += t.cachedTokens;
+      ms.reasoningTokens += t.reasoningTokens;
+      ms.cost += t.cost;
+      r.perModel[t.model] = ms;
+    }
+    return r;
+  }
+
+  /** Compute the dashboard summary filtered to a single workspace.
+   *  Reconstructs per-day rollups from the filtered recentTasks ring buffer
+   *  instead of using the global rollups (which aggregate across projects). */
+  getSummaryForWorkspace(root: string): TelemetrySummary {
+    const today = todayStr(new Date(this.now()));
+    const wsTasks = this.data.recentTasks.filter(
+      (t) => t.workspaceRoot === root,
+    );
+
+    // Group filtered tasks by day for trend reconstruction.
+    const byDay = new Map<string, TaskRecord[]>();
+    for (const t of wsTasks) {
+      const arr = byDay.get(t.day) ?? [];
+      arr.push(t);
+      byDay.set(t.day, arr);
+    }
+
+    const todayRollup = this.rollupFromTasks(
+      today,
+      byDay.get(today) ?? [],
+    );
+
+    const requestsPerTask = todayRollup.tasks > 0 ? todayRollup.requests / todayRollup.tasks : 0;
+    const totalTokens = todayRollup.inputTokens + todayRollup.outputTokens;
+    const tokensPerTask = todayRollup.tasks > 0 ? totalTokens / todayRollup.tasks : 0;
+    const costPerTask = todayRollup.tasks > 0 ? todayRollup.cost / todayRollup.tasks : 0;
+    const avgTaskDurationMs = todayRollup.tasks > 0 ? todayRollup.totalTaskDurationMs / todayRollup.tasks : 0;
+    const successfulTasksPer1000Requests =
+      todayRollup.requests > 0 ? (todayRollup.successfulTasks / todayRollup.requests) * 1000 : 0;
+    const contextSavingsPct =
+      todayRollup.rawContextTokens > 0
+        ? 1 - todayRollup.actualContextTokens / todayRollup.rawContextTokens
+        : 0;
+    const totalToolOps = todayRollup.toolCalls + todayRollup.cacheHits;
+    const cacheHitRate = totalToolOps > 0 ? todayRollup.cacheHits / totalToolOps : 0;
+
+    // Trend window (oldest → newest), reconstructed from filtered tasks.
+    const trend: DailyRollup[] = [];
+    for (let i = this.config.trendDays - 1; i >= 0; i--) {
+      const d = new Date(this.now());
+      d.setDate(d.getDate() - i);
+      const key = todayStr(d);
+      trend.push(this.rollupFromTasks(key, byDay.get(key) ?? []));
+    }
+
+    return {
+      today: todayRollup,
+      successfulTasksPer1000Requests,
+      requestsPerTask,
+      tokensPerTask,
+      costPerTask,
+      avgTaskDurationMs,
+      contextSavingsPct,
+      cacheHitRate,
+      reduction: {
+        truncationTokensSaved: todayRollup.truncationTokensSaved ?? 0,
+        compactionTokensSaved: todayRollup.compactionTokensSaved ?? 0,
+        redundantCallsAvoided: todayRollup.redundantCallsAvoided ?? 0,
+        snapshotTasks: todayRollup.snapshotTasks ?? 0,
+      },
+      optimize: {
+        autoRoutedTasks: todayRollup.autoRoutedTasks ?? 0,
+        escalations: todayRollup.escalations ?? 0,
+        escalationSuccesses: todayRollup.escalationSuccesses ?? 0,
+        escalationRate: todayRollup.tasks > 0 ? (todayRollup.escalations ?? 0) / todayRollup.tasks : 0,
+        escalationSuccessRate: (todayRollup.escalations ?? 0) > 0
+          ? (todayRollup.escalationSuccesses ?? 0) / (todayRollup.escalations ?? 0)
+          : 0,
+      },
+      trend,
+      recentTasks: wsTasks.slice(0, 25),
     };
   }
 

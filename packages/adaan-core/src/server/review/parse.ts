@@ -1,5 +1,5 @@
-import type { ReviewLens, ReviewTask, TaskPriority } from "./types.js";
-import { TASK_PRIORITIES } from "./types.js";
+import type { ReviewLens, ReviewTask, TaskPriority, FindingType, FindingConfidence } from "./types.js";
+import { TASK_PRIORITIES, FINDING_TYPES, FINDING_CONFIDENCES } from "./types.js";
 
 /** Derive a 3-5 letter short code from a lens label:
  *  1 word → first 4 letters (Statistician → STAT), 2 words → first 2 letters
@@ -21,6 +21,18 @@ export function lensCode(lens: Pick<ReviewLens, "label" | "code">): string {
 function safePriority(s: string): TaskPriority {
   const up = s.trim().toUpperCase();
   return (TASK_PRIORITIES as string[]).includes(up) ? (up as TaskPriority) : "P3";
+}
+
+function safeFindingType(s: unknown): FindingType | undefined {
+  if (typeof s !== "string") return undefined;
+  const low = s.trim().toLowerCase();
+  return (FINDING_TYPES as string[]).includes(low) ? (low as FindingType) : undefined;
+}
+
+function safeConfidence(s: unknown): FindingConfidence | undefined {
+  if (typeof s !== "string") return undefined;
+  const low = s.trim().toLowerCase();
+  return (FINDING_CONFIDENCES as string[]).includes(low) ? (low as FindingConfidence) : undefined;
 }
 
 function splitList(s: string): string[] {
@@ -122,6 +134,8 @@ function normalizeTask(raw: unknown): ReviewTask | null {
     impact: typeof o.impact === "string" ? o.impact.trim() : "",
     issueBody: typeof o.issueBody === "string" ? o.issueBody : typeof o.body === "string" ? o.body : "",
     labels: Array.isArray(o.labels) ? o.labels.map(String) : splitList(String(o.labels ?? "")),
+    type: safeFindingType(o.type),
+    confidence: safeConfidence(o.confidence),
     githubUrl: typeof o.githubUrl === "string" ? o.githubUrl : undefined,
   };
 }
@@ -130,7 +144,7 @@ function normalizeTask(raw: unknown): ReviewTask | null {
  *  Follows the format: Summary → Current behavior → Expected behavior →
  *  Affected code → Acceptance criteria → References */
 export function buildIssueBody(
-  task: Pick<ReviewTask, "priority" | "issue" | "mainFinding" | "fix" | "impact" | "lenses" | "reviewers">,
+  task: Pick<ReviewTask, "priority" | "issue" | "mainFinding" | "fix" | "impact" | "lenses" | "reviewers" | "type" | "confidence">,
 ): string {
   return [
     "## Summary",
@@ -153,6 +167,8 @@ export function buildIssueBody(
     "- [ ] Tests pass and cover the fix",
     "",
     "## References",
+    ...(task.type ? [`- **Type:** ${task.type}`] : []),
+    ...(task.confidence ? [`- **Confidence:** ${task.confidence}`] : []),
     `- **Lenses:** ${task.lenses.join(", ") || "—"}`,
     `- **Reviewers:** ${task.reviewers.join(", ") || "—"}`,
     `- **Priority:** ${task.priority}`,
@@ -175,9 +191,10 @@ export function backfillTaskFields(task: ReviewTask): void {
 }
 
 /** Build labels for a task. */
-export function buildLabels(task: Pick<ReviewTask, "priority" | "lenses">): string[] {
+export function buildLabels(task: Pick<ReviewTask, "priority" | "lenses" | "type">): string[] {
   return [
     `priority:${task.priority.toLowerCase()}`,
     ...task.lenses.map((l) => `lens:${l.toLowerCase().replace(/\s+/g, "-")}`),
+    ...(task.type ? [`type:${task.type}`] : []),
   ];
 }

@@ -269,6 +269,149 @@
   --backdrop-rgb: 0, 20, 28;
 }
 
+:root[data-theme="cottonCandy"] {
+  --color-bg: #fbdce2;
+  --color-surface: rgba(255, 245, 248, 0.75);
+  --color-surface-solid: #fff5f8;
+  --color-surface-hover: rgba(255, 235, 242, 0.85);
+  --color-surface-glass: linear-gradient(160deg, rgba(255, 245, 248, 0.85), rgba(251, 220, 226, 0.9));
+  /* Cotton Candy: blushing pink swirls with sky blue and mint under a joyful
+     carnival sky. A light, dreamy confection — pink-led, cooled by aqua blue
+     and ocean mint, warmed by a soft carnival-amber. Distinct from Dawn's cool
+     lavender and Ghibli's earthy forest: this is pure spun-sugar pastel. */
+  --color-accent: #ff9fb2;
+  --color-accent-secondary: #0acdff;
+  --color-accent-cyan: #60ab9a;
+  --color-accent-glow: rgba(var(--accent-rgb), 0.28);
+  --color-cyan-glow: rgba(var(--accent-3-rgb), 0.28);
+  --color-purple-glow: rgba(var(--accent-2-rgb), 0.28);
+  --color-text: #4a3b4a;
+  --color-muted: #b0a0b0;
+  --color-success: #60ab9a;
+  --color-warning: #f4a261;
+  --color-error: #e8647a;
+  --color-border: rgba(var(--muted-rgb), 0.4);
+  --color-border-accent: rgba(var(--accent-rgb), 0.4);
+  --color-selection: rgba(var(--accent-rgb), 0.22);
+  /* Soft sugar-spun glows — gentle, like cotton candy catching the light */
+  --glow-accent: 0 0 18px rgba(var(--accent-rgb), 0.22);
+  --glow-text: 0 0 8px rgba(var(--accent-rgb), 0.16);
+  /* Cotton candy swirl: pink → sky aqua → ocean mint → sky aqua → pink */
+  --gradient-spectrum: linear-gradient(90deg, #ff9fb2 0%, #0acdff 25%, #60ab9a 50%, #0acdff 75%, #ff9fb2 100%);
+
+  /* RGB channels for rgba() tints */
+  --accent-rgb: 255, 159, 178;
+  --accent-2-rgb: 10, 205, 255;
+  --accent-3-rgb: 96, 171, 154;
+  --muted-rgb: 176, 160, 176;
+  --error-rgb: 232, 100, 122;
+  --success-rgb: 96, 171, 154;
+  --warning-rgb: 244, 162, 97;
+  /* Semantic surface layers (rgb) — pale blush clouds + frost */
+  --surface-1-rgb: 255, 245, 248;
+  --surface-2-rgb: 251, 220, 226;
+  --bg-deep-rgb: 251, 220, 226;
+  --active-text: #4a3b4a;
+  --shadow-rgb: 120, 90, 110;
+  --backdrop-rgb: 100, 70, 90;
+}
+
+:root[data-theme="goldenTwilight"] {
+  --color-bg: #000814;
+  --color-surface: rgba(var(--surface-1-rgb), 0.65);
+  --color-surface-solid: #001d3d;
+  --color-surface-hover: rgba(0, 40, 80, 0.75);
+  --color-surface-glass: linear-gradient(160deg, rgba(var(--surface-1-rgb), 0.8), rgba(var(--surface-2-rgb), 0.9));
+  /* Golden Twilight: midnight navy and sapphire set off sparkling yellows —
+     the intrigue of nightfall's gold. Distinct from Retrowave's neon pink-on-
+     black and Fiesta's indigo: pure navy depths with two gold accents (school-
+     bus yellow + radiant gold) and a cool sapphire secondary. Glows are warm
+     gold against the deep blue, like lanterns at dusk. */
+  --color-accent: #ffd60a;
+  --color-accent-secondary: #003566;
+  --color-accent-cyan: #ffc300;
+  --color-accent-glow: rgba(var(--accent-rgb), 0.42);
+  --color-cyan-glow: rgba(var(--accent-3-rgb), 0.42);
+  --color-purple-glow: rgba(var(--accent-2-rgb), 0.42);
+  --color-text: #f0e8c8;
+  --color-muted: #5a7a9a;
+  --color-success: #60ab9a;
+  --color-warning: #ffc300;
+  --color-error: #ff5555;
+  --color-border: rgba(var(--muted-rgb), 0.3);
+  --color-border-accent: rgba(var(--accent-rgb), 0.4);
+  --color-selection: rgba(var(--accent-rgb), 0.3);
+  /* Warm gold glow against the deep navy — lanterns at twilight */
+  --glow-accent: 0 0 22px var(--color-accent-glow);
+  --glow-text: 0 0 10px var(--color-accent-glow);
+  /* Twilight spectrum: gold → school-bus yellow → oxford navy → prussian blue → gold */
+  --gradient-spectrum: linear-gradient(90deg, #ffd60a 0%, #ffc300 25%, #003566 50%, #001d3d 75%, #ffd60a 100%);
+
+  /* RGB channels for rgba() tints */
+  --accent-rgb: 255, 214, 10;
+  --accent-2-rgb: 0, 53, 102;
+  --accent-3-rgb: 255, 195, 0;
+  --muted-rgb: 90, 122, 154;
+  --error-rgb: 255, 85, 85;
+  --success-rgb: 96, 171, 154;
+  --warning-rgb: 255, 195, 0;
+  /* Semantic surface layers (rgb) — prussian/oxford navy */
+  --surface-1-rgb: 0, 29, 61;
+  --surface-2-rgb: 0, 8, 20;
+  --bg-deep-rgb: 0, 8, 20;
+  --active-text: #ffffff;
+  --shadow-rgb: 0, 5, 15;
+  --backdrop-rgb: 0, 5, 15;
+}
+
+:root[data-theme="brightContrasts"] {
+  --color-bg: #f8ffe5;
+  --color-surface: rgba(255, 255, 255, 0.75);
+  --color-surface-solid: #ffffff;
+  --color-surface-hover: rgba(248, 255, 229, 0.9);
+  --color-surface-glass: linear-gradient(160deg, rgba(255, 255, 255, 0.85), rgba(248, 255, 229, 0.9));
+  /* Bright Contrasts: lemon yellow, lively teal, rich blue, vibrant pink, and
+     bold gold — joyous, energetic moods. A light, high-energy theme led by
+     bubblegum pink, cooled by emerald + pacific cyan, warmed by school-bus
+     yellow. Distinct from Cotton Candy's dreamy pastels: this is saturated,
+     punchy, and unapologetically bold. */
+  --color-accent: #ef476f;
+  --color-accent-secondary: #1b9aaa;
+  --color-accent-cyan: #06d6a0;
+  --color-accent-glow: rgba(var(--accent-rgb), 0.3);
+  --color-cyan-glow: rgba(var(--accent-3-rgb), 0.3);
+  --color-purple-glow: rgba(var(--accent-2-rgb), 0.3);
+  --color-text: #2d3a2d;
+  --color-muted: #8a9a8a;
+  --color-success: #06d6a0;
+  --color-warning: #ffc43d;
+  --color-error: #ef476f;
+  --color-border: rgba(var(--muted-rgb), 0.4);
+  --color-border-accent: rgba(var(--accent-rgb), 0.4);
+  --color-selection: rgba(var(--accent-rgb), 0.22);
+  /* Bright but soft glows — energetic, not neon */
+  --glow-accent: 0 0 18px rgba(var(--accent-rgb), 0.22);
+  --glow-text: 0 0 8px rgba(var(--accent-rgb), 0.16);
+  /* Joyous spectrum: pink → pacific cyan → emerald → school-bus yellow → pink */
+  --gradient-spectrum: linear-gradient(90deg, #ef476f 0%, #1b9aaa 25%, #06d6a0 50%, #ffc43d 75%, #ef476f 100%);
+
+  /* RGB channels for rgba() tints */
+  --accent-rgb: 239, 71, 111;
+  --accent-2-rgb: 27, 154, 170;
+  --accent-3-rgb: 6, 214, 160;
+  --muted-rgb: 138, 154, 138;
+  --error-rgb: 239, 71, 111;
+  --success-rgb: 6, 214, 160;
+  --warning-rgb: 255, 196, 61;
+  /* Semantic surface layers (rgb) — pale lemon + white */
+  --surface-1-rgb: 255, 255, 255;
+  --surface-2-rgb: 248, 255, 229;
+  --bg-deep-rgb: 248, 255, 229;
+  --active-text: #2d3a2d;
+  --shadow-rgb: 90, 100, 80;
+  --backdrop-rgb: 70, 80, 60;
+}
+
 /* Global Font: JetBrains Mono everywhere */
 *, *::before, *::after {
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;

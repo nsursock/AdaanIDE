@@ -34,6 +34,7 @@
     date: string;
     timestamp: number;
     message: string;
+    repo?: string;
   }
 
   /** Unified timeline item — either a local snapshot or a git commit. */

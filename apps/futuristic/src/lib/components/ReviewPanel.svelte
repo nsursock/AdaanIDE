@@ -31,6 +31,7 @@
     IconUpload,
     IconListCheck,
     IconFileText,
+    IconDownload,
     IconListDetails,
     IconColumns,
     IconBroadcast,
@@ -41,6 +42,7 @@
     IconPoint,
   } from "@tabler/icons-svelte";
   import { settingsStore } from "@adaan/core";
+  import AggregatorModelPicker from "./AggregatorModelPicker.svelte";
   import type {
     ReviewConfig,
     ReviewResult,
@@ -61,13 +63,31 @@
   let results = $state<any[]>([]);
   let freeModels = $state<{ id: string; name: string; paramSize?: string }[]>([]);
   let paidModels = $state<{ id: string; name: string; paramSize?: string }[]>([]);
+  let localModels = $state<{ id: string; name: string; providerName?: string }[]>([]);
   let selectedConfigId = $state<string | null>(null);
   let selectedResultId = $state<string | null>(null);
   let selectedResult = $state<(ReviewResult & { tasks: ReviewTask[] }) | null>(null);
   let editing = $state<ReviewConfig | null>(null);
   let deletingId = $state<string | null>(null);
+
+  /** Two-way bridge between the timeout UI (minutes) and config.timeoutMs (ms).
+   *  0 = use provider default. */
+  let timeoutMinutes = $state(5);
+  $effect(() => {
+    if (editing) {
+      timeoutMinutes = editing.timeoutMs ? Math.round(editing.timeoutMs / 60_000) : 5;
+    }
+  });
+  function onTimeoutInput() {
+    if (editing) {
+      editing.timeoutMs = timeoutMinutes > 0 ? timeoutMinutes * 60_000 : undefined;
+    }
+  }
   let running = $state(false);
   let backgroundRunning = $state(false);
+  /** Id of the run this panel is attached to (for re-attach dedup). Runs are
+   *  server-side now — this tracks only the SSE subscription. */
+  let attachedRunId = $state<string | null>(null);
   let runLog = $state<string>("");
   let schedulerEnabled = $state(false);
   let error = $state<string | null>(null);
@@ -82,11 +102,14 @@
   let showHistory = $state(false);
   let cancelling = $state(false);
   /** Reviewer status cards: one per reviewer model, updated live during a run. */
-  let reviewerCards = $state<{ model: string; index: number; status: "running" | "done" | "error"; isAggregator?: boolean }[]>([]);
+  let reviewerCards = $state<{ model: string; index: number; status: "running" | "queued" | "done" | "error"; isAggregator?: boolean; error?: string }[]>([]);
   /** Accumulated streaming text per reviewer model. */
   let reviewerTexts = $state<Record<string, string>>({});
   /** Aggregator reasoning text (shown in the aggregator card instead of JSON). */
   let aggregatorReasoning = $state<string>("");
+  /** Whether the aggregator has produced any text or reasoning yet — used to
+   *  suppress redundant queued transitions from interspersed keep-alives. */
+  let aggregatorStarted = $state<boolean>(false);
   /** Current run phase for the progress label. */
   let runPhase = $state<string>("");
   /** Detailed view shows streaming text; simple shows status cards only. */
@@ -123,6 +146,10 @@
   /** Full result shown in the raw-output debug modal. */
   let rawResult = $state<ReviewResult | null>(null);
   let rawLoading = $state(false);
+  /** Start Fresh modal: selectively wipe configs, reviews, and/or tasks. */
+  let showStartFresh = $state(false);
+  let startFreshOpts = $state({ configs: true, results: true, taskLists: true });
+  let startFreshBusy = $state(false);
 
   let selectedConfig = $derived(configs.find((c) => c.id === selectedConfigId) ?? null);
   let configResults = $derived(results.filter((r) => r.configId === selectedConfigId));
@@ -225,7 +252,8 @@
   }
 
   async function loadConfigs() {
-    const res = await fetch("/api/review/configs");
+    const qs = workspaceRoot ? `?root=${encodeURIComponent(workspaceRoot)}` : "";
+    const res = await fetch(`/api/review/configs${qs}`);
     if (res.ok) {
       const data = await res.json();
       configs = data.configs;
@@ -235,7 +263,8 @@
   }
 
   async function loadResults() {
-    const res = await fetch("/api/review/results");
+    const qs = workspaceRoot ? `?root=${encodeURIComponent(workspaceRoot)}` : "";
+    const res = await fetch(`/api/review/results${qs}`);
     if (res.ok) {
       const data = await res.json();
       results = data.results;
@@ -283,6 +312,80 @@
     }
   }
 
+  /** Dump the raw reviewer + judge output from the open modal to a markdown
+   *  file for offline debugging and analysis. */
+  function dumpRawToMarkdown() {
+    if (!rawResult) return;
+    const r = rawResult;
+    const date = r.startedAt ? new Date(r.startedAt).toISOString().replace(/[:.]/g, "-") : "unknown";
+    const lines: string[] = [
+      `# Review Raw Output — ${r.configName}`,
+      "",
+      `- **Run ID:** ${r.id}`,
+      `- **Started:** ${r.startedAt ?? "—"}`,
+      `- **Completed:** ${r.completedAt ?? "—"}`,
+      `- **Status:** ${r.status}`,
+      `- **Source:** ${r.source ?? "review"}`,
+      `- **Triggered by:** ${r.triggeredBy ?? "—"}`,
+      `- **Expertise:** ${r.expertise ?? "—"}`,
+      `- **Reviewer models:** ${(r.reviewerModels ?? []).join(", ") || "—"}`,
+      `- **Aggregator model:** ${r.aggregatorModel || "—"}`,
+      ...(r.estimatedCost != null ? [`- **Estimated cost:** $${r.estimatedCost.toFixed(4)}`] : []),
+      ...(r.estimatedTokens != null ? [`- **Estimated tokens:** ${r.estimatedTokens.toLocaleString()}`] : []),
+      ...(r.targetPath ? [`- **Target path:** \`${r.targetPath}\``] : []),
+      "",
+      "---",
+      "",
+    ];
+
+    const entries = Object.entries(r.rawOutputs ?? {});
+    if (entries.length > 0) {
+      lines.push(`## Reviewer Outputs (${entries.length})`, "");
+      for (const [model, text] of entries) {
+        lines.push(
+          `### ${r.source === "upload" ? "Pasted analysis" : "Reviewer"}: ${modelLabel(model)}`,
+          "",
+          `**Model ID:** \`${model}\``,
+          `**Length:** ${text.length.toLocaleString()} chars`,
+          "",
+          "```",
+          text || "(empty output)",
+          "```",
+          "",
+        );
+      }
+    } else {
+      lines.push("## Reviewer Outputs", "", "No reviewer output was captured for this run.", "");
+    }
+
+    lines.push("## Judge / Aggregator Output", "");
+    if (r.aggregatorOutput) {
+      lines.push(
+        `**Model:** ${modelLabel(r.aggregatorModel)}`,
+        `**Model ID:** \`${r.aggregatorModel}\``,
+        `**Length:** ${r.aggregatorOutput.length.toLocaleString()} chars`,
+        "",
+        "```json",
+        r.aggregatorOutput,
+        "```",
+        "",
+      );
+    } else {
+      lines.push("Judge output was not captured for this run.", "");
+    }
+
+    const md = lines.join("\n");
+    const blob = new Blob([md], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `review-${date}-${r.id}.md`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   async function loadScheduler() {
     const res = await fetch("/api/review/scheduler");
     if (res.ok) {
@@ -294,13 +397,15 @@
     const res = await fetch("/api/review/models");
     if (res.ok) {
       const data = await res.json();
-      freeModels = data.free;
-      paidModels = data.paid;
+      freeModels = data.free ?? [];
+      paidModels = data.paid ?? [];
+      localModels = data.local ?? [];
     }
   }
 
   async function loadAllTasks() {
-    const res = await fetch("/api/review/tasks/all");
+    const qs = workspaceRoot ? `?root=${encodeURIComponent(workspaceRoot)}` : "";
+    const res = await fetch(`/api/review/tasks/all${qs}`);
     if (res.ok) {
       const data = await res.json();
       allTasks = data.tasks;
@@ -323,7 +428,7 @@
   let lastPoll = 0;
 
   onMount(() => {
-    void loadAll();
+    void loadAll().then(discoverActiveRuns);
     // Entrance animation is handled by the parent (+page.svelte) which
     // animates all .panel-enter elements. Don't re-animate here — it
     // conflicts with the parent's stagger and leaves panels dimmed.
@@ -335,11 +440,35 @@
       void loadResults();
       void loadScheduler();
       void loadConfigs();
+      if (!running) void discoverActiveRuns();
       if (monitorView === "work") void loadAllTasks();
     }, 2_000);
   });
 
   onDestroy(() => { if (pollTimer) clearInterval(pollTimer); });
+
+  /** Runs are server-side and survive disconnects. Discover any in-flight run
+   *  for this workspace and re-attach this panel's live view to it (a no-op
+   *  if we're already attached). */
+  async function discoverActiveRuns() {
+    if (running && attachedRunId) return;
+    const active = await fetchActiveRuns();
+    if (active.length > 0) await attachToRun(active[0].resultId);
+  }
+
+  // Reload configs/results when the workspace changes (project switch).
+  $effect(() => {
+    if (workspaceRoot) {
+      selectedConfigId = null;
+      selectedResult = null;
+      selectedResultId = null;
+      // A run for another project keeps going server-side; detach locally and
+      // discover whether THIS project has one in flight.
+      attachedRunId = null;
+      running = false;
+      void loadAll().then(discoverActiveRuns);
+    }
+  });
 
   // --- Config editing --------------------------------------------------------
   function newConfig() {
@@ -451,6 +580,41 @@
     await loadResults();
   }
 
+  /** Wipe monitoring data selectively — configs, run history, and/or living
+   *  task lists. Cancels any in-flight runs first. */
+  async function startFresh() {
+    if (!startFreshOpts.configs && !startFreshOpts.results && !startFreshOpts.taskLists) return;
+    startFreshBusy = true;
+    try {
+      const res = await fetch("/api/review/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(startFreshOpts),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        error = e.error ?? "reset failed";
+        return;
+      }
+      // Reset local state.
+      if (startFreshOpts.configs) { selectedConfigId = null; editing = null; }
+      if (startFreshOpts.results) { selectedResult = null; selectedResultId = null; }
+      running = false;
+      backgroundRunning = false;
+      attachedRunId = null;
+      reviewerCards = [];
+      reviewerTexts = {};
+      aggregatorReasoning = "";
+    aggregatorStarted = false;
+      showStartFresh = false;
+      await loadAll();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      startFreshBusy = false;
+    }
+  }
+
   // --- Scheduler -------------------------------------------------------------
   async function toggleScheduler() {
     const v = !schedulerEnabled;
@@ -464,6 +628,65 @@
   }
 
   // --- Run a review ----------------------------------------------------------
+
+  /** Read an SSE run stream to completion, feeding handleProgress. Resolves
+   *  with the final result id (complete/error/cancelled), or null on
+   *  disconnect — a disconnect is NOT an error: the run keeps going
+   *  server-side and is re-attachable. */
+  async function consumeRunStream(res: Response): Promise<string | null> {
+    if (!res.ok || !res.body) {
+      const e = await res.json().catch(() => ({}));
+      error = e.error ?? "run failed";
+      return null;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalResultId: string | null = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const data = line.replace(/^data: /, "").trim();
+        if (!data) continue;
+        try {
+          const ev = JSON.parse(data);
+          handleProgress(ev);
+          if (ev.phase === "complete") finalResultId = ev.result?.id ?? null;
+          if (ev.phase === "error") error = ev.message;
+        } catch { /* ignore */ }
+      }
+    }
+    return finalResultId;
+  }
+
+  /** After a run stream ends: refresh run history and open the final result.
+   *  If the stream dropped mid-run (network hiccup), discover + re-attach. */
+  async function settleAfterRun(finalResultId: string | null) {
+    await loadResults();
+    if (finalResultId) {
+      attachedRunId = null;
+      running = false;
+      cancelling = false;
+      await loadResult(finalResultId);
+      return;
+    }
+    // Stream ended without a terminal event — check if the run is still alive
+    // server-side and re-attach.
+    const active = await fetchActiveRuns();
+    if (active.length > 0) {
+      await attachToRun(active[0].resultId);
+      return;
+    }
+    running = false;
+    cancelling = false;
+    attachedRunId = null;
+    backgroundRunning = false;
+  }
+
   async function runReviewNow(config: ReviewConfig) {
     if (!workspaceRoot) { error = "Open a workspace first."; return; }
     running = true;
@@ -473,6 +696,7 @@
     reviewerCards = [];
     reviewerTexts = {};
     aggregatorReasoning = "";
+    aggregatorStarted = false;
     error = null;
     try {
       const res = await fetch("/api/review/run", {
@@ -482,42 +706,71 @@
           config.id ? { configId: config.id, workspaceRoot } : { config, workspaceRoot },
         ),
       });
-      if (!res.ok || !res.body) {
-        const e = await res.json().catch(() => ({}));
-        error = e.error ?? "run failed";
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let finalResultId: string | null = null;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const data = line.replace(/^data: /, "").trim();
-          if (!data) continue;
-          try {
-            const ev = JSON.parse(data);
-            handleProgress(ev);
-            if (ev.phase === "complete") finalResultId = ev.result?.id ?? null;
-            if (ev.phase === "cancelled") { /* handled by handleProgress */ }
-            if (ev.phase === "error") error = ev.message;
-          } catch { /* ignore */ }
-        }
-      }
-      await loadResults();
-      if (finalResultId) await loadResult(finalResultId);
+      const finalResultId = await consumeRunStream(res);
+      await settleAfterRun(finalResultId);
     } catch (e) {
       // Aborted fetch throws a TypeError — don't show it as an error if we cancelled.
       if (!cancelling) error = e instanceof Error ? e.message : String(e);
-    } finally {
       running = false;
       cancelling = false;
     }
+  }
+
+  /** Resume an interrupted run — reuses persisted reviewer outputs, re-runs
+   *  only the missing/failed reviewers, then aggregates. */
+  async function resumeRunNow(resultId: string) {
+    if (!workspaceRoot) { error = "Open a workspace first."; return; }
+    running = true;
+    cancelling = false;
+    runLog = "Resuming…";
+    runPhase = "";
+    reviewerCards = [];
+    reviewerTexts = {};
+    aggregatorReasoning = "";
+    aggregatorStarted = false;
+    error = null;
+    try {
+      const res = await fetch("/api/review/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resultId, workspaceRoot }),
+      });
+      const finalResultId = await consumeRunStream(res);
+      await settleAfterRun(finalResultId);
+    } catch (e) {
+      if (!cancelling) error = e instanceof Error ? e.message : String(e);
+      running = false;
+      cancelling = false;
+    }
+  }
+
+  /** Attach this panel's live view to an in-flight server-side run. */
+  async function attachToRun(runId: string) {
+    if (attachedRunId === runId && running) return;
+    attachedRunId = runId;
+    running = true;
+    cancelling = false;
+    error = null;
+    try {
+      const res = await fetch(`/api/review/run?runId=${encodeURIComponent(runId)}`);
+      const finalResultId = await consumeRunStream(res);
+      await settleAfterRun(finalResultId);
+    } catch {
+      running = false;
+      attachedRunId = null;
+    }
+  }
+
+  /** Query the server for runs in flight on this workspace (runs survive
+   *  disconnects — this is how we re-discover them after a project switch,
+   *  tab reload, or app restart-while-running). */
+  async function fetchActiveRuns(): Promise<{ resultId: string; configId: string; configName: string }[]> {
+    try {
+      const qs = workspaceRoot ? `?root=${encodeURIComponent(workspaceRoot)}` : "";
+      const res = await fetch(`/api/review/runs${qs}`);
+      if (res.ok) return (await res.json()).runs ?? [];
+    } catch { /* best-effort */ }
+    return [];
   }
 
   async function cancelRun() {
@@ -530,6 +783,17 @@
   function handleProgress(ev: any) {
     runPhase = ev.phase;
     switch (ev.phase) {
+      case "run.started":
+        // First event of every run (also first on re-attach replay) — reset
+        // the live view so replayed events rebuild it cleanly.
+        attachedRunId = ev.runId;
+        running = true;
+        runLog = ev.resumed ? `Resuming "${ev.configName}"…` : `Running "${ev.configName}"…`;
+        reviewerCards = [];
+        reviewerTexts = {};
+        aggregatorReasoning = "";
+    aggregatorStarted = false;
+        break;
       case "context": runLog = "Gathering context…"; break;
       case "cost": runLog = `Est. cost: $${ev.estimatedCost} · ${ev.estimatedTokens.toLocaleString()} tokens`; break;
       case "committee": runLog = ev.message; break;
@@ -539,19 +803,38 @@
           reviewerCards = [...reviewerCards, { model: ev.model, index: ev.reviewerIndex, status: "running" }];
         }
         break;
+      case "committee.queued":
+        // Mark the reviewer card as queued at the provider — but ONLY before
+        // any text has arrived. OpenRouter sends PROCESSING keep-alives
+        // throughout the stream; without this guard the card would flash
+        // between queued/running on every keep-alive after the first token.
+        if (!(reviewerTexts[ev.model] ?? "").trim()) {
+          reviewerCards = reviewerCards.map((c) =>
+            c.model === ev.model && c.index === ev.reviewerIndex && c.status === "running"
+              ? { ...c, status: "queued" }
+              : c,
+          );
+          runLog = `${modelLabel(ev.model)} queued at provider…`;
+        }
+        break;
       case "committee.delta":
-        // Accumulate streaming text per reviewer.
+        // Accumulate streaming text per reviewer; transition out of queued state.
         reviewerTexts = { ...reviewerTexts, [ev.model]: (reviewerTexts[ev.model] ?? "") + ev.text };
+        reviewerCards = reviewerCards.map((c) =>
+          c.model === ev.model && c.status === "queued" ? { ...c, status: "running" } : c,
+        );
         break;
       case "committee.done":
         reviewerCards = reviewerCards.map((c) =>
-          c.model === ev.model ? { ...c, status: ev.error ? "error" : "done" } : c,
+          c.model === ev.model ? { ...c, status: ev.error ? "error" : "done", error: ev.error ?? undefined } : c,
         );
-        runLog = `Reviewer ${ev.model.split("/").pop()} done (${ev.reviewerIndex + 1})`;
+        runLog = ev.error
+          ? `Reviewer ${ev.model.split("/").pop()} failed: ${ev.error}`
+          : `Reviewer ${ev.model.split("/").pop()} done (${ev.reviewerIndex + 1})`;
         break;
       case "parse":
         // Mark the aggregator card as done when we move past aggregation.
-        reviewerCards = reviewerCards.map((c) => c.isAggregator && c.status === "running" ? { ...c, status: "done" } : c);
+        reviewerCards = reviewerCards.map((c) => c.isAggregator && (c.status === "running" || c.status === "queued") ? { ...c, status: "done" } : c);
         runLog = ev.message ?? "Parsing outputs…";
         break;
       case "aggregator":
@@ -561,13 +844,30 @@
           reviewerCards = [...reviewerCards, { model: ev.model, index: reviewerCards.length, status: "running", isAggregator: true }];
         }
         break;
+      case "aggregator.queued":
+        // Only show queued before any output — same guard as committee.queued.
+        if (!aggregatorStarted) {
+          reviewerCards = reviewerCards.map((c) =>
+            c.isAggregator && c.status === "running" ? { ...c, status: "queued" } : c,
+          );
+          runLog = `Aggregator (${modelLabel(ev.model)}) queued at provider…`;
+        }
+        break;
       case "aggregator.delta":
         // JSON output — don't show in the card (it's not useful to watch).
-        // Just update the run log.
+        // Transition out of queued state; just update the run log.
+        aggregatorStarted = true;
+        reviewerCards = reviewerCards.map((c) =>
+          c.isAggregator && c.status === "queued" ? { ...c, status: "running" } : c,
+        );
         runLog = `Aggregator producing JSON…`;
         break;
       case "aggregator.reasoning":
         aggregatorReasoning += ev.text;
+        aggregatorStarted = true;
+        reviewerCards = reviewerCards.map((c) =>
+          c.isAggregator && c.status === "queued" ? { ...c, status: "running" } : c,
+        );
         runLog = `Aggregator thinking…`;
         break;
       case "github": runLog = `GitHub: ${ev.message}`; break;
@@ -851,6 +1151,7 @@
     const map = new Map<string, string>();
     for (const m of freeModels) map.set(m.id, m.name || m.id);
     for (const m of paidModels) map.set(m.id, m.name || m.id);
+    for (const m of localModels) map.set(m.id, m.name || m.id);
     return map;
   });
 
@@ -1118,6 +1419,7 @@
     reviewerCards = [];
     reviewerTexts = {};
     aggregatorReasoning = "";
+    aggregatorStarted = false;
     uploadMode = false;
 
     try {
@@ -1126,31 +1428,11 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(reqBody),
       });
-      if (!res.ok || !res.body) {
-        const e = await res.json().catch(() => ({}));
-        error = e.error ?? "Aggregation failed";
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try { handleProgress(JSON.parse(line.slice(6))); } catch { /* skip */ }
-        }
-      }
-      await loadResults();
-      if (selectedResultId) await loadResult(selectedResultId);
+      const finalResultId = await consumeRunStream(res);
+      if (!res.ok || !res.body) { running = false; return; }
+      await settleAfterRun(finalResultId);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
-    } finally {
       running = false;
       cancelling = false;
     }
@@ -1297,30 +1579,55 @@
     return sorted;
   });
 
-  /** Minimal markdown → HTML for issue bodies (headings, bold, lists, checkboxes). */
+  /** Minimal markdown → HTML for issue bodies (headings, bold, lists,
+   *  checkboxes, code blocks, inline code). Good enough for GitHub issue
+   *  bodies — not a full markdown parser. */
   function renderMarkdown(md: string): string {
-    let html = md
+    // Extract code blocks first so their content isn't mangled by inline rules.
+    const codeBlocks: string[] = [];
+    let working = md.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, _lang, code) => {
+      const idx = codeBlocks.length;
+      codeBlocks.push(code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"));
+      return `\x00CODEBLOCK${idx}\x00`;
+    });
+
+    // Escape HTML in the remaining text.
+    working = working
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
+
     // Headings
-    html = html.replace(/^## (.+)$/gm, '<h4 class="md-h">$1</h4>');
-    html = html.replace(/^### (.+)$/gm, '<h5 class="md-h">$1</h5>');
+    working = working.replace(/^## (.+)$/gm, '<h4 class="md-h">$1</h4>');
+    working = working.replace(/^### (.+)$/gm, '<h5 class="md-h">$1</h5>');
+
+    // Inline code (after HTML escape so backticks are still intact)
+    working = working.replace(/`([^`]+)`/g, '<code>$1</code>');
+
     // Bold
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    working = working.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
     // Checkboxes
-    html = html.replace(/^- \[ \] (.+)$/gm, '<div class="md-check"><input type="checkbox" disabled /> $1</div>');
-    html = html.replace(/^- \[x\] (.+)$/gim, '<div class="md-check"><input type="checkbox" checked disabled /> $1</div>');
+    working = working.replace(/^- \[ \] (.+)$/gm, '<div class="md-check"><input type="checkbox" disabled /> $1</div>');
+    working = working.replace(/^- \[x\] (.+)$/gim, '<div class="md-check"><input type="checkbox" checked disabled /> $1</div>');
+
     // Bullet lists
-    html = html.replace(/^- (.+)$/gm, '<div class="md-li">• $1</div>');
+    working = working.replace(/^- (.+)$/gm, '<div class="md-li">• $1</div>');
+
     // Paragraphs (lines not already wrapped)
-    html = html.split("\n").map((line) => {
+    working = working.split("\n").map((line) => {
       const trimmed = line.trim();
       if (!trimmed) return "";
-      if (/^<(h4|h5|div|strong)/.test(trimmed)) return trimmed;
+      if (/^<(h4|h5|div|strong|code|pre)/.test(trimmed)) return trimmed;
+      if (/^\x00CODEBLOCK/.test(trimmed)) return trimmed;
       return `<p class="md-p">${trimmed}</p>`;
     }).join("\n");
-    return html;
+
+    // Restore code blocks
+    working = working.replace(/\x00CODEBLOCK(\d+)\x00/g, (_m, idx) =>
+      `<pre><code>${codeBlocks[+idx]}</code></pre>`);
+
+    return working;
   }
 </script>
 
@@ -1421,6 +1728,15 @@
         </button>
         <button class="icon-btn" onclick={loadAll} disabled={running} title="Refresh" aria-label="Refresh">
           <IconRefresh size={15} class={running || backgroundRunning ? "spin" : ""} />
+        </button>
+        <button
+          class="icon-btn"
+          onclick={() => (showStartFresh = true)}
+          disabled={running || (configs.length === 0 && results.length === 0)}
+          title="Start fresh — erase monitoring data"
+          aria-label="Start fresh"
+        >
+          <IconTrash size={15} />
         </button>
         {#if selectedConfig}
           {#if running}
@@ -1693,6 +2009,8 @@
                   <div class="reviewer-card-head">
                     {#if card.status === "running"}
                       <IconRefresh size={14} class="spin" />
+                    {:else if card.status === "queued"}
+                      <IconClock size={14} class="pulse" />
                     {:else if card.status === "done"}
                       <IconCheck size={14} />
                     {:else}
@@ -1704,12 +2022,18 @@
                   </div>
                   {#if detailedReviewers}
                     <div class="reviewer-text">
-                      {#if card.isAggregator}
+                      {#if card.status === "error" && card.error}
+                        <span class="reviewer-error-msg">{card.error}</span>
+                      {:else if card.isAggregator}
                         {aggregatorReasoning || "(no reasoning stream — producing JSON output…)"}
+                      {:else if card.status === "done" && !(reviewerTexts[card.model] ?? "").trim()}
+                        <span class="reviewer-error-msg">No output — model returned empty response</span>
+                      {:else if card.status === "queued"}
+                        <span class="reviewer-queued-msg">Queued at provider — waiting for a slot…</span>
                       {:else}
                         {reviewerTexts[card.model] ?? ""}
                       {/if}
-                      {#if card.status === "running"}<span class="caret-blink"></span>{/if}
+                      {#if card.status === "running" || card.status === "queued"}<span class="caret-blink"></span>{/if}
                     </div>
                   {/if}
                 </div>
@@ -1772,7 +2096,7 @@
                     <span class="status-tag {r.status}">
                       {#if r.status === "running"}<IconRefresh size={11} class="spin" />
                       {:else if r.status === "complete"}<IconCircleCheck size={11} />
-                      {:else if r.status === "error"}<IconAlertTriangle size={11} />
+                      {:else if r.status === "error" || r.status === "interrupted"}<IconAlertTriangle size={11} />
                       {:else}<IconSquare size={11} />{/if}
                       {r.status}
                     </span>
@@ -1800,6 +2124,17 @@
                   </td>
                   <td class="col-actions">
                     <div class="task-row-actions">
+                      {#if r.status === "interrupted" && r.canResume}
+                        <button
+                          class="icon-btn resume-btn"
+                          onclick={(e) => { e.stopPropagation(); void resumeRunNow(r.id); }}
+                          title="Resume — reuses completed reviewer outputs, re-runs only the missing ones"
+                          aria-label="Resume run"
+                          disabled={running}
+                        >
+                          <IconPlayerPlay size={13} />
+                        </button>
+                      {/if}
                       {#if r.status === "complete" && r.taskCount > 0}
                         <button
                           class="icon-btn {selectedResultId === r.id ? "active" : ""}"
@@ -2100,6 +2435,7 @@
                   <div class="theater-card {card.status}" class:aggregator={card.isAggregator}>
                     <div class="theater-card-head">
                       {#if card.status === "running"}<IconRefresh size={14} class="spin" />
+                      {:else if card.status === "queued"}<IconClock size={14} class="pulse" />
                       {:else if card.status === "done"}<IconCheck size={14} />
                       {:else}<IconAlertTriangle size={14} />{/if}
                       <span class="theater-card-model">{card.isAggregator ? "Aggregator" : modelLabel(card.model)}</span>
@@ -2107,8 +2443,8 @@
                       <span class="theater-card-status">{card.status}</span>
                     </div>
                     <div class="theater-card-text">
-                      {#if card.isAggregator}{aggregatorReasoning || "(producing JSON output…)"}{:else}{reviewerTexts[card.model] ?? ""}{/if}
-                      {#if card.status === "running"}<span class="caret-blink"></span>{/if}
+                      {#if card.isAggregator}{aggregatorReasoning || "(producing JSON output…)"}{:else if card.status === "queued"}<span class="reviewer-queued-msg">Queued at provider — waiting for a slot…</span>{:else}{reviewerTexts[card.model] ?? ""}{/if}
+                      {#if card.status === "running" || card.status === "queued"}<span class="caret-blink"></span>{/if}
                     </div>
                   </div>
                 {/each}
@@ -2367,7 +2703,15 @@
                       </span>
                     {/if}
                     {#if r.estimatedCost != null && r.estimatedCost > 0}<span class="cost-badge"><IconCoin size={10} /> {fmtCost(r.estimatedCost)}</span>{/if}
+                    {#if r.status === "interrupted" && r.canResume}
+                      <button class="btn btn-xs timeline-resume-btn" onclick={() => void resumeRunNow(r.id)} disabled={running} title="Resume — reuses completed reviewer outputs, re-runs only the missing ones">
+                        <IconPlayerPlay size={11} /> Resume
+                      </button>
+                    {/if}
                   </div>
+                  {#if r.status === "interrupted"}
+                    <div class="timeline-msg-note">{r.error ?? "Interrupted — the run can be resumed."}</div>
+                  {/if}
                   {#if r.status === "complete" && r.taskCount > 0}
                     <details class="timeline-msg-details">
                       <summary class="timeline-msg-summary">View {r.taskCount} task{r.taskCount === 1 ? "" : "s"}</summary>
@@ -2527,7 +2871,11 @@
               <span class="raw-section-id">{model}</span>
               <span class="raw-section-len">{text.length.toLocaleString()} chars</span>
             </summary>
-            <pre class="raw-pre">{text || "(empty output)"}</pre>
+            {#if text}
+              <pre class="raw-pre">{text}</pre>
+            {:else}
+              <div class="raw-empty" style="color: var(--color-error);">No output — this reviewer returned an empty response. It may have hit a context limit, rate limit, or the model may not support the prompt format.</div>
+            {/if}
           </details>
         {/each}
         {#if rawEntries.length === 0}
@@ -2549,6 +2897,9 @@
         </details>
       </div>
       <footer class="modal-footer">
+        <button class="btn btn-sm" onclick={dumpRawToMarkdown} disabled={!rawResult?.rawOutputs && !rawResult?.aggregatorOutput}>
+          <IconDownload size={13} /> Dump to MD
+        </button>
         <button class="btn btn-sm" onclick={() => (rawResult = null)}>Close</button>
       </footer>
     </div>
@@ -2578,11 +2929,17 @@
           </div>
           <div class="issue-preview-labels">
             <span class="issue-label priority-{detailTask.priority.toLowerCase()}">{detailTask.priority}</span>
+            {#if detailTask.type}
+              <span class="issue-label type-label">{detailTask.type}</span>
+            {/if}
+            {#if detailTask.confidence}
+              <span class="issue-label confidence-label">{detailTask.confidence} confidence</span>
+            {/if}
             {#each detailTask.lenses as lens (lens)}
-              <span class="issue-label lens-label">{lensLabel(lens)}</span>
+              <span class="issue-label lens-label">{lensEmoji(lens)} {lensLabel(lens, detailTask.configId)}</span>
             {/each}
             {#each detailTask.labels as lbl (lbl)}
-              {#if !lbl.startsWith("priority:") && !lbl.startsWith("lens:")}
+              {#if !lbl.startsWith("priority:") && !lbl.startsWith("lens:") && !lbl.startsWith("type:") && !lbl.startsWith("confidence:")}
                 <span class="issue-label">{lbl}</span>
               {/if}
             {/each}
@@ -2606,7 +2963,7 @@
             <p>After the fix: {detailTask.fix || "—"}</p>
             <h2>Affected code</h2>
             <p><strong>Lens(es):</strong> {detailTask.lenses.map((l: string) => `${lensEmoji(l)} ${lensLabel(l, detailTask.configId)}`).join(", ") || "—"}</p>
-            <p><strong>Reviewer(s):</strong> {detailTask.reviewers.map((r: string) => friendlyReviewer(r)).join(", ") || "—"}</p>
+            <p><strong>Reviewer(s):</strong> {detailTask.reviewers.map((r: string) => reviewerPopover(r, detailTask.reviewerModels)).join(", ") || "—"}</p>
             <h2>Acceptance criteria</h2>
             <ul>
               <li>- [ ] The issue described in the Summary is resolved</li>
@@ -2616,7 +2973,7 @@
             <h2>References</h2>
             <ul>
               <li><strong>Lenses:</strong> {detailTask.lenses.map((l: string) => `${lensEmoji(l)} ${lensLabel(l, detailTask.configId)}`).join(", ") || "—"}</li>
-              <li><strong>Reviewers:</strong> {detailTask.reviewers.map((r: string) => friendlyReviewer(r)).join(", ") || "—"}</li>
+              <li><strong>Reviewers:</strong> {detailTask.reviewers.map((r: string) => reviewerPopover(r, detailTask.reviewerModels)).join(", ") || "—"}</li>
               <li><strong>Priority:</strong> {detailTask.priority}</li>
             </ul>
           </div>
@@ -2626,8 +2983,8 @@
         <div class="issue-preview-meta">
           <div class="meta-row">
             <span class="meta-key">Reviewers</span>
-            <span class="meta-val" title={detailTask.reviewers.map((r: string) => reviewerPopover(r, detailTask.reviewerModels)).join(", ")}>
-              {detailTask.reviewers.map((r: string) => friendlyReviewer(r)).join(", ") || "—"}
+            <span class="meta-val">
+              {detailTask.reviewers.map((r: string) => reviewerPopover(r, detailTask.reviewerModels)).join(", ") || "—"}
             </span>
           </div>
           <div class="meta-row">
@@ -2752,13 +3109,32 @@
         <!-- Aggregator -->
         <label class="field">
           <span class="field-label">Aggregator / Judge <small class="field-hint">— "openrouter/auto" = auto-route to best model</small></span>
-          <input class="input" bind:value={editing.aggregatorModel} placeholder="openrouter/auto" list="agg-models" />
-          <datalist id="agg-models">
-            {#each [...freeModels, ...paidModels] as m (m.id)}
-              <option value={m.id}>{m.name}</option>
-            {/each}
-          </datalist>
+          <AggregatorModelPicker
+            value={editing.aggregatorModel}
+            {freeModels}
+            {paidModels}
+            {localModels}
+            onSelect={(id) => { if (editing) editing.aggregatorModel = id; }}
+          />
         </label>
+
+        <!-- Per-request timeout -->
+        <div class="field">
+          <span class="field-label">Per-request timeout <small class="field-hint">— hard deadline per LLM call (reviewers + judge)</small></span>
+          <div class="schedule-row">
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={timeoutMinutes}
+              oninput={(e) => { timeoutMinutes = +(e.currentTarget as HTMLInputElement).value; onTimeoutInput(); }}
+              class="input schedule-num"
+              placeholder="5"
+            />
+            <span class="schedule-unit" style="font-size: 0.75rem; color: var(--color-muted);">minutes</span>
+            <span class="schedule-hint">0 = provider default (3 min)</span>
+          </div>
+        </div>
 
         <!-- Schedule -->
         <div class="field">
@@ -2859,6 +3235,69 @@
           <button class="btn btn-sm btn-primary" onclick={saveConfig}><IconCheck size={13} /> Save</button>
         </div>
       </footer>
+    </div>
+  </div>
+{/if}
+
+<!-- Start Fresh modal — selectively wipe monitoring data -->
+{#if showStartFresh}
+  <div
+    class="delete-confirm-overlay"
+    onclick={() => !startFreshBusy && (showStartFresh = false)}
+    onkeydown={(e) => { if (e.key === "Escape" && !startFreshBusy) showStartFresh = false; }}
+    role="button"
+    tabindex="-1"
+    aria-label="Cancel start fresh"
+  >
+    <div
+      class="delete-confirm-dialog start-fresh-dialog"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}
+      role="dialog"
+      aria-label="Start fresh"
+      aria-modal="true"
+      tabindex="-1"
+    >
+      <div class="flex items-center gap-2 mb-3">
+        <IconTrash size={18} class="flex-shrink-0" style="color: var(--color-error);" />
+        <span class="font-bold text-sm">Start fresh?</span>
+      </div>
+      <p class="text-xs opacity-70 mb-4">
+        Selectively erase monitoring data. This cannot be undone. Any in-flight runs will be cancelled.
+      </p>
+      <div class="start-fresh-options">
+        <label class="start-fresh-option">
+          <input type="checkbox" bind:checked={startFreshOpts.configs} disabled={startFreshBusy} />
+          <div class="start-fresh-option-text">
+            <div class="start-fresh-option-label">Configs</div>
+            <div class="start-fresh-option-desc">{configs.length} config{configs.length === 1 ? "" : "s"} — review definitions, lenses, schedules</div>
+          </div>
+        </label>
+        <label class="start-fresh-option">
+          <input type="checkbox" bind:checked={startFreshOpts.results} disabled={startFreshBusy} />
+          <div class="start-fresh-option-text">
+            <div class="start-fresh-option-label">Reviews</div>
+            <div class="start-fresh-option-desc">{results.length} run{results.length === 1 ? "" : "s"} — run history, raw outputs, costs</div>
+          </div>
+        </label>
+        <label class="start-fresh-option">
+          <input type="checkbox" bind:checked={startFreshOpts.taskLists} disabled={startFreshBusy} />
+          <div class="start-fresh-option-text">
+            <div class="start-fresh-option-label">Tasks</div>
+            <div class="start-fresh-option-desc">Living task lists — all tasks across all configs (any status)</div>
+          </div>
+        </label>
+      </div>
+      <div class="flex items-center justify-end gap-2 mt-4">
+        <button class="btn text-xs px-3 py-1.5" onclick={() => (showStartFresh = false)} disabled={startFreshBusy}>Cancel</button>
+        <button
+          class="btn-danger text-xs px-3 py-1.5"
+          onclick={startFresh}
+          disabled={startFreshBusy || (!startFreshOpts.configs && !startFreshOpts.results && !startFreshOpts.taskLists)}
+        >
+          {#if startFreshBusy}Erasing…{:else}Erase selected{/if}
+        </button>
+      </div>
     </div>
   </div>
 {/if}
@@ -3013,6 +3452,8 @@
   .issue-label.priority-p2 { background: rgba(var(--accent-rgb), 0.15); color: var(--color-accent); }
   .issue-label.priority-p3 { background: rgba(var(--muted-rgb), 0.2); color: var(--color-muted); }
   .issue-label.lens-label { background: rgba(var(--accent-2-rgb), 0.15); color: var(--color-accent-2); }
+  .issue-label.type-label { background: rgba(var(--error-rgb), 0.12); color: var(--color-error); }
+  .issue-label.confidence-label { background: rgba(var(--muted-rgb), 0.15); color: var(--color-muted); }
   .issue-preview-body {
     font-size: 0.75rem;
     line-height: 1.7;
@@ -3063,12 +3504,39 @@
   .task-count-cell { display: flex; gap: 0.2rem; flex-wrap: wrap; }
   .status-tag.running { color: var(--color-accent); background: rgba(var(--accent-rgb), 0.1); }
   .status-tag.error { color: var(--color-error); background: rgba(var(--error-rgb), 0.1); }
+  .status-tag.interrupted { color: var(--color-warning); background: rgba(var(--warning-rgb), 0.1); }
   .status-tag.cancelled { color: var(--color-muted); background: rgba(var(--muted-rgb), 0.1); }
+  .icon-btn.resume-btn { color: var(--color-warning); border-color: rgba(var(--warning-rgb), 0.35); }
+  .icon-btn.resume-btn:hover:not(:disabled) { background: rgba(var(--warning-rgb), 0.12); }
   .task-row.selected { background: rgba(var(--accent-rgb), 0.08); }
   .task-row.selected:hover { background: rgba(var(--accent-rgb), 0.12); }
 
   /* Upload analysis modal */
   .modal-wide { max-width: 800px; }
+  /* Start Fresh modal */
+  .start-fresh-dialog { max-width: 420px; }
+  .start-fresh-options { display: flex; flex-direction: column; gap: 0.5rem; }
+  .start-fresh-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.5rem 0.6rem;
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+    background: rgba(var(--surface-1-rgb), 0.3);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .start-fresh-option:hover { border-color: var(--color-border-accent); }
+  .start-fresh-option input[type="checkbox"] {
+    margin-top: 0.15rem;
+    accent-color: var(--color-error);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .start-fresh-option-text { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+  .start-fresh-option-label { font-size: 0.75rem; font-weight: 700; color: var(--color-text); }
+  .start-fresh-option-desc { font-size: 0.625rem; color: var(--color-muted); line-height: 1.4; }
   .upload-intro {
     font-size: 0.75rem;
     color: var(--color-muted);
@@ -3477,6 +3945,9 @@
   .reviewer-card.running {
     border-color: rgba(var(--accent-rgb), 0.3);
   }
+  .reviewer-card.queued {
+    border-color: rgba(var(--warning-rgb), 0.3);
+  }
   .reviewer-card.done {
     border-color: rgba(var(--success-rgb), 0.3);
   }
@@ -3490,6 +3961,7 @@
     flex-shrink: 0;
   }
   .reviewer-card.running .reviewer-card-head { color: var(--color-accent); }
+  .reviewer-card.queued .reviewer-card-head { color: var(--color-warning); }
   .reviewer-card.done .reviewer-card-head { color: var(--color-success); }
   .reviewer-card.error .reviewer-card-head { color: var(--color-error); }
   .reviewer-model {
@@ -3510,6 +3982,7 @@
     flex-shrink: 0;
   }
   .reviewer-card.running .reviewer-status-tag { color: var(--color-accent); }
+  .reviewer-card.queued .reviewer-status-tag { color: var(--color-warning); }
   .reviewer-card.done .reviewer-status-tag { color: var(--color-success); }
   .reviewer-card.error .reviewer-status-tag { color: var(--color-error); }
   .reviewer-text {
@@ -3525,6 +3998,23 @@
   }
   .reviewer-card.done .reviewer-text { opacity: 0.55; }
   .reviewer-card.error .reviewer-text { opacity: 0.4; }
+  .reviewer-error-msg {
+    color: var(--color-error);
+    font-weight: 600;
+    opacity: 0.9;
+  }
+  .reviewer-queued-msg {
+    color: var(--color-warning);
+    font-weight: 600;
+    opacity: 0.9;
+  }
+  .pulse {
+    animation: pulse-fade 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse-fade {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
   .reviewer-card.aggregator-card {
     grid-column: 1 / -1;
     border-color: rgba(var(--accent-2-rgb), 0.3);
@@ -3533,6 +4023,10 @@
   .reviewer-card.aggregator-card.running {
     border-color: rgba(var(--accent-2-rgb), 0.4);
     box-shadow: 0 0 12px rgba(var(--accent-2-rgb), 0.15);
+  }
+  .reviewer-card.aggregator-card.queued {
+    border-color: rgba(var(--warning-rgb), 0.4);
+    box-shadow: 0 0 12px rgba(var(--warning-rgb), 0.12);
   }
   .reviewer-card.aggregator-card .reviewer-card-head { color: var(--color-accent-secondary); }
   .reviewer-sub-model {
@@ -4460,6 +4954,7 @@
     min-height: 120px;
   }
   .theater-card.running { border-color: var(--color-border-accent); box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.15); }
+  .theater-card.queued { border-color: rgba(var(--warning-rgb), 0.4); box-shadow: 0 0 12px rgba(var(--warning-rgb), 0.12); }
   .theater-card.done { border-color: rgba(var(--success-rgb), 0.3); }
   .theater-card.error { border-color: rgba(var(--error-rgb), 0.4); }
   .theater-card.aggregator { border-style: dashed; }
@@ -4726,6 +5221,15 @@
   .timeline-msg-date { font-weight: 600; }
   .timeline-msg-trigger { color: var(--color-muted); text-transform: capitalize; }
   .timeline-msg-models { color: var(--color-muted); }
+  .timeline-msg.interrupted .timeline-msg-avatar { color: var(--color-warning); background: rgba(var(--warning-rgb), 0.1); }
+  .timeline-msg-note { font-size: 0.6875rem; color: var(--color-warning); opacity: 0.9; }
+  .timeline-resume-btn {
+    display: inline-flex; align-items: center; gap: 0.2rem;
+    color: var(--color-warning);
+    border: 1px solid rgba(var(--warning-rgb), 0.35);
+    background: rgba(var(--warning-rgb), 0.08);
+  }
+  .timeline-resume-btn:hover:not(:disabled) { background: rgba(var(--warning-rgb), 0.15); }
   .timeline-msg-stats { display: flex; gap: 0.2rem; }
   .timeline-msg-details { margin-top: 0.2rem; }
   .timeline-msg-summary {

@@ -48,7 +48,15 @@ export async function resolveReviewerModels(
     const { free, paid } = await fetchModelsByTier(provider);
     const all = [...free, ...paid];
     const models = config.reviewerModels
-      .map((id) => all.find((m) => m.id === id))
+      .map((id) => {
+        // Try exact match first, then prefix match (the catalog often has
+        // date-suffixed slugs like "anthropic/claude-sonnet-5-20260630"
+        // while the user selected "anthropic/claude-sonnet-5").
+        const exact = all.find((m) => m.id === id);
+        if (exact) return exact;
+        const prefix = all.find((m) => m.id.startsWith(id + "-") || m.id.startsWith(id));
+        return prefix;
+      })
       .filter((m): m is ModelInfo => !!m);
     return { ids: config.reviewerModels, models };
   }
@@ -88,6 +96,15 @@ export function estimateReviewCost(
   const EST_OUTPUT_PER_REVIEWER = 4000;
   const EST_AGG_OUTPUT = 2000;
 
+  // OpenRouter returns per-token pricing (e.g. "0.000002" = $0.000002/token
+  // = $2/1M tokens). Convert to per-1M for the cost formula below.
+  // Free models can have negative pricing (subsidy). Clamp to 0 so cost
+  // estimates never go negative.
+  const pricePer1M = (s: string | undefined): number => {
+    const v = parseFloat(s ?? "0");
+    return (isNaN(v) || v < 0 ? 0 : v) * 1_000_000;
+  };
+
   let totalCost = 0;
   let totalTokens = 0;
 
@@ -97,9 +114,9 @@ export function estimateReviewCost(
     if (!model) continue;
     const inputTokens = contextTokens + PROMPT_OVERHEAD;
     const outputTokens = EST_OUTPUT_PER_REVIEWER;
-    const promptPrice = parseFloat(model.pricing?.prompt ?? "0") || 0;
-    const completionPrice = parseFloat(model.pricing?.completion ?? "0") || 0;
-    // OpenRouter prices are per 1M tokens
+    const promptPrice = pricePer1M(model.pricing?.prompt);
+    const completionPrice = pricePer1M(model.pricing?.completion);
+    // promptPrice/completionPrice are per-1M tokens (converted above)
     const cost = (inputTokens / 1_000_000) * promptPrice + (outputTokens / 1_000_000) * completionPrice;
     totalCost += cost;
     totalTokens += inputTokens + outputTokens;
@@ -109,8 +126,8 @@ export function estimateReviewCost(
   if (aggregatorModel) {
     const aggInput = reviewerCount * EST_OUTPUT_PER_REVIEWER + PROMPT_OVERHEAD;
     const aggOutput = EST_AGG_OUTPUT;
-    const promptPrice = parseFloat(aggregatorModel.pricing?.prompt ?? "0") || 0;
-    const completionPrice = parseFloat(aggregatorModel.pricing?.completion ?? "0") || 0;
+    const promptPrice = pricePer1M(aggregatorModel.pricing?.prompt);
+    const completionPrice = pricePer1M(aggregatorModel.pricing?.completion);
     totalCost += (aggInput / 1_000_000) * promptPrice + (aggOutput / 1_000_000) * completionPrice;
     totalTokens += aggInput + aggOutput;
   }

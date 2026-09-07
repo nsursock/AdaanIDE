@@ -125,10 +125,15 @@ function resolveReviewers(
 
 /** GET /api/review/tasks/all — returns all tasks across all configs,
  *  consolidated into a single list. L-codes and "Committee Reviewer" are
- *  resolved to short codes and friendly names respectively. */
-export async function GET() {
+ *  resolved to short codes and friendly names respectively.
+ *  Optional ?root= filters to configs whose workspaceRoot matches. */
+export async function GET({ url }) {
   await reviewStore.load();
-  const configs = reviewStore.getConfigs();
+  const root = url.searchParams.get("root") ?? undefined;
+  const allConfigs = reviewStore.getConfigs();
+  const configs = root
+    ? allConfigs.filter((c) => c.workspaceRoot === root)
+    : allConfigs;
   const allResults = reviewStore.getResults();
 
   const allTasks: Array<{

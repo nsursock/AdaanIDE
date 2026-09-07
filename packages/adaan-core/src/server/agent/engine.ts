@@ -250,6 +250,7 @@ export class AgentEngine {
       provider: this.deriveProvider(model),
       requestedModel,
       experiment: experiment ?? null,
+      workspaceRoot: workspace.rootPath,
     });
     let taskStatus: "success" | "error" | "cancelled" = "success";
     let taskFinalized = false;
@@ -1100,18 +1101,6 @@ export class AgentEngine {
               // clear the failure cache so it can retry previously-failed
               // calls with the new file state.
               session.failedCallCache.clear();
-
-              // Phase A3: auto git checkpoint before the first write of a task.
-              // Best-effort — silently skip if not a git repo.
-              if (!task.checkpointTaken) {
-                try {
-                  await workspace.gitCheckpoint("auto: pre-task checkpoint");
-                  task.checkpointTaken = true;
-                } catch {
-                  // Not a git repo or git unavailable — skip silently.
-                  task.checkpointTaken = true;
-                }
-              }
 
               // Phase A2: post-edit verification gate. Run the cheapest
               // file-scoped syntax check on the edited file. On failure,

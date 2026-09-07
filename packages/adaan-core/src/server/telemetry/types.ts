@@ -124,6 +124,9 @@ export interface TaskRecord {
   experiment: { name: string; arm: string } | null;
   /** Phase A: number of post-edit verification gate failures on this task. */
   verifyGateFailures: number;
+  /** The workspace root path this task ran in. Used for per-project filtering
+   *  in the Stats view. Undefined on records created before this field existed. */
+  workspaceRoot?: string;
 }
 
 /** Per-model empirical stats for a single day — the capability-matrix seed. */

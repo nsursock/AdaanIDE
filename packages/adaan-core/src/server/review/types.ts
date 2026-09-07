@@ -31,25 +31,39 @@ export interface ReviewLens {
 export type TaskPriority = "P0" | "P1" | "P2" | "P3";
 export const TASK_PRIORITIES: TaskPriority[] = ["P0", "P1", "P2", "P3"];
 
+/** Finding type — distinguishes confirmed defects from risks and improvements. */
+export type FindingType = "bug" | "risk" | "improvement";
+export const FINDING_TYPES: FindingType[] = ["bug", "risk", "improvement"];
+
+/** Confidence level — how well the evidence supports the finding. */
+export type FindingConfidence = "high" | "medium" | "low";
+export const FINDING_CONFIDENCES: FindingConfidence[] = ["high", "medium", "low"];
+
 /** A single prioritized task in the living task list. */
 export interface ReviewTask {
   priority: TaskPriority;
-  /** 3–5 word issue title. */
+  /** Concise issue title (one short phrase). */
   issue: string;
-  /** 1–2 sentences, concrete. */
+  /** One crisp sentence describing the core problem. */
   mainFinding: string;
-  /** 1 sentence, actionable. */
+  /** One crisp sentence describing the proposed solution. */
   fix: string;
   /** Lens ids that flagged this task. */
   lenses: string[];
   /** Reviewer model ids that flagged this task. */
   reviewers: string[];
-  /** 8–12 word impact statement. */
+  /** One crisp sentence describing the real-world consequence. */
   impact: string;
   /** GitHub-issue-ready markdown body. */
   issueBody: string;
   /** Labels for GitHub issue creation. */
   labels: string[];
+  /** Finding type: bug (confirmed defect), risk (likely but unverified), or
+   *  improvement (valid engineering improvement, not a defect). Only `bug`
+   *  should reach P0. */
+  type?: FindingType;
+  /** How well the evidence supports the finding. */
+  confidence?: FindingConfidence;
   /** URL of the created GitHub issue, if any. */
   githubUrl?: string;
   /** Whether this task was resolved/dismissed since the last run. */
@@ -100,6 +114,10 @@ export interface ReviewConfig {
   /** Whether to write the living task list to TASKS.md in the workspace root
    *  after each run. */
   writeTasksFile?: boolean;
+  /** Per-request hard deadline in ms for reviewer and aggregator LLM calls.
+   *  Review prompts are large (10k+ tokens) and models with reasoning can
+   *  take 2-4 minutes. Default 300s. 0 = use provider default (180s). */
+  timeoutMs?: number;
   /** Whether this config's schedule is active. */
   enabled: boolean;
   /** ISO timestamp of the last scheduled run. */
@@ -131,23 +149,37 @@ export interface ReviewResult {
   estimatedCost?: number;
   /** Estimated total tokens consumed. */
   estimatedTokens?: number;
-  status: "running" | "complete" | "error" | "cancelled";
+  /** `interrupted` = the server process stopped (quit/restart) while this run
+   *  was in progress. Completed reviewer outputs are preserved in rawOutputs
+   *  so the run can be resumed instead of re-run from scratch. */
+  status: "running" | "complete" | "error" | "cancelled" | "interrupted";
   error?: string;
   triggeredBy: "manual" | "schedule";
   /** Living-list merge statistics for this run. */
   mergeStats?: { added: number; carried: number; autoResolved: number; reopened: number; keptResolved: number };
+  /** OpenRouter generation IDs captured from the SSE stream, keyed by model
+   *  id. Used for post-hoc auditing via GET /api/v1/generation?id=<genId>
+   *  to retrieve per-generation metadata (provider, latency, TTFT, tokens,
+   *  cost, routing). Includes both reviewer and aggregator generations. */
+  generationIds?: Record<string, string>;
 }
 
 /** SSE progress event yielded by the runner. */
 export type ReviewProgress =
+  /** Emitted first by the run manager (also replayed to re-attaching clients)
+   *  so the client knows the run id for re-attach. `resumed` marks a run that
+   *  continued from an interrupted result. */
+  | { phase: "run.started"; runId: string; configId: string; configName: string; resumed?: boolean }
   | { phase: "context"; message: string }
   | { phase: "cost"; estimatedCost: number; estimatedTokens: number }
   | { phase: "committee"; message: string; model: string; reviewerIndex: number; reviewerCount: number }
   | { phase: "committee.start"; model: string; reviewerIndex: number; reviewerCount: number }
+  | { phase: "committee.queued"; model: string; reviewerIndex: number; reviewerCount: number }
   | { phase: "committee.delta"; model: string; reviewerIndex: number; text: string }
   | { phase: "committee.done"; model: string; reviewerIndex: number; error?: string }
   | { phase: "cancelled"; message: string }
   | { phase: "aggregator"; message: string; model: string }
+  | { phase: "aggregator.queued"; model: string }
   | { phase: "aggregator.delta"; text: string }
   | { phase: "aggregator.reasoning"; text: string }
   | { phase: "parse"; message: string }

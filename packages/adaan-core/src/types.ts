@@ -4,7 +4,7 @@
 
 // --- Themes -----------------------------------------------------------------
 
-export type ThemeId = "retrowave" | "ghibli" | "fiesta" | "dawn" | "synthwave84" | "solarizedDark";
+export type ThemeId = "retrowave" | "ghibli" | "fiesta" | "dawn" | "synthwave84" | "solarizedDark" | "cottonCandy" | "goldenTwilight" | "brightContrasts";
 
 export interface ThemePalette {
   id: ThemeId;
@@ -311,6 +311,13 @@ export interface ProviderChatOptions {
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  /** Per-request hard deadline in ms. Overrides the provider's default
+   *  when set. Used by the review runner to give large-context review
+   *  prompts more time than agent chat turns. */
+  deadlineMs?: number;
+  /** OpenRouter session id — groups related requests in the dashboard
+   *  so a multi-request review run can be traced as one chain. */
+  sessionId?: string;
 }
 
 export type ProviderEventType =
@@ -364,6 +371,10 @@ export interface ProviderFinish {
     reasoningTokens: number;
     cost: number;
   };
+  /** OpenRouter generation ID (e.g. "gen-..."), captured from the SSE stream
+   *  or non-streaming JSON response. Used for post-hoc auditing via
+   *  GET /api/v1/generation?id=<generationId>. */
+  generationId?: string;
 }
 
 export interface ProviderError {

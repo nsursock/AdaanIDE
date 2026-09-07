@@ -55,6 +55,15 @@ export {
   type SchedulerDeps,
 } from "./scheduler.js";
 export {
+  reviewRunManager,
+  ReviewRunManager,
+  type ActiveRunInfo,
+  type RunSubscription,
+  type StartReviewRunArgs,
+  type StartAggregateRunArgs,
+} from "./run-manager.js";
+export { sleepGuard } from "./sleep-guard.js";
+export {
   fetchModelsByTier,
   poolForTier,
   resolveReviewerModels,

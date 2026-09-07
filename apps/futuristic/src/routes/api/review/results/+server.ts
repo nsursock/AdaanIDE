@@ -96,10 +96,12 @@ function resolveReviewers(
   return cleaned.map((r) => (r.includes("/") || /:free$/i.test(r)) ? friendlyModelName(r) : r);
 }
 
-/** GET /api/review/results — list all results (summary), or ?id= for full detail. */
+/** GET /api/review/results — list all results (summary), or ?id= for full detail.
+ *  Optional ?root= filters results to configs whose workspaceRoot matches. */
 export async function GET({ url }) {
   await reviewStore.load();
   const id = url.searchParams.get("id");
+  const root = url.searchParams.get("root") ?? undefined;
   if (id) {
     const result = reviewStore.getResult(id);
     if (!result) return json({ error: "not found" }, { status: 404 });
@@ -117,7 +119,13 @@ export async function GET({ url }) {
     }
     return json({ result });
   }
-  const results = reviewStore.getResults().map((r) => {
+  const configs = reviewStore.getConfigs();
+  const configWsRoot = new Map(configs.map((c) => [c.id, c.workspaceRoot]));
+  const allResults = reviewStore.getResults();
+  const filteredResults = root
+    ? allResults.filter((r) => configWsRoot.get(r.configId) === root)
+    : allResults;
+  const results = filteredResults.map((r) => {
     const legacy = r as unknown as { findings?: { priority?: string }[]; model?: string };
     const tasks = r.tasks ?? legacy.findings ?? [];
     return {
@@ -140,6 +148,13 @@ export async function GET({ url }) {
       p3: tasks.filter((t: any) => t.priority === "P3").length,
       estimatedCost: r.estimatedCost,
       estimatedTokens: r.estimatedTokens,
+      /** Interrupted runs with surviving reviewer outputs can be resumed. */
+      canResume:
+        r.status === "interrupted" &&
+        !!configWsRoot.has(r.configId) &&
+        Object.values(r.rawOutputs ?? {}).some(
+          (v) => v && !String(v).startsWith("[REVIEWER ERROR:"),
+        ),
     };
   });
   return json({ results });

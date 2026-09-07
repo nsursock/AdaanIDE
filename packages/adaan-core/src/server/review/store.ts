@@ -102,6 +102,7 @@ export function migrateReviewConfig(raw: Record<string, unknown>, seenIds?: Set<
   if (typeof raw.targetPath === "string" && raw.targetPath) config.targetPath = raw.targetPath;
   if (typeof raw.workspaceRoot === "string" && raw.workspaceRoot) config.workspaceRoot = raw.workspaceRoot;
   if (typeof raw.lastRunAt === "string") config.lastRunAt = raw.lastRunAt;
+  if (typeof raw.timeoutMs === "number" && raw.timeoutMs > 0) config.timeoutMs = raw.timeoutMs;
   return config;
 }
 
@@ -120,12 +121,23 @@ export class ReviewStore {
     try {
       const raw = await fs.readFile(this.filePath, "utf-8");
       const parsed = JSON.parse(raw) as Partial<ReviewStoreData>;
-      // Filter out zombie "running" results — these are from interrupted runs
-      // (server restart, browser close, etc.) that never completed. Without
-      // this, the UI permanently shows "background review running".
+      // Convert zombie "running" results (server restart / process exit
+      // mid-run) into "interrupted" instead of dropping them: reviewer
+      // outputs persisted incrementally survive, so the run is *resumable*
+      // rather than lost. Also stops the UI permanently showing
+      // "background review running".
       const rawResults = Array.isArray(parsed.results) ? parsed.results : [];
-      const liveResults = rawResults.filter((r) => r.status !== "running");
-      const hadZombies = liveResults.length < rawResults.length;
+      const hadZombies = rawResults.some((r) => r.status === "running");
+      const liveResults = rawResults.map((r): ReviewResult =>
+        r.status === "running"
+          ? {
+              ...r,
+              status: "interrupted",
+              error: "Server stopped before this run finished — it can be resumed.",
+              completedAt: new Date().toISOString(),
+            }
+          : r,
+      );
 
       // Migrate legacy configs (missing/empty ids, old field layout). Track
       // id changes so results and task lists stay linked to their config.
@@ -254,6 +266,16 @@ export class ReviewStore {
 
   async setSchedulerEnabled(v: boolean): Promise<void> {
     this.data.schedulerEnabled = v;
+    await this.persist();
+  }
+
+  /** Wipe monitoring data selectively. Each flag targets a specific store:
+   *  configs, results (run history), and/or taskLists (living task lists).
+   *  At least one flag must be true. */
+  async resetAll(opts: { configs?: boolean; results?: boolean; taskLists?: boolean }): Promise<void> {
+    if (opts.configs) this.data.configs = [];
+    if (opts.results) this.data.results = [];
+    if (opts.taskLists) this.data.taskLists = {};
     await this.persist();
   }
 }

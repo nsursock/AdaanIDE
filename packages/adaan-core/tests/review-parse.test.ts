@@ -151,11 +151,12 @@ test("REVIEW_PRESETS: at least 9 presets available", async () => {
 
 test("estimateReviewCost: computes cost for paid models", async () => {
   const { estimateReviewCost } = await import("../src/server/review/models.js");
+  // OpenRouter returns per-token pricing. $15/1M tokens = $0.000015/token.
   const fakeModel = {
     id: "test/paid",
     name: "Test",
     contextLength: 200000,
-    pricing: { prompt: "15", completion: "75" },
+    pricing: { prompt: "0.000015", completion: "0.000075" },
     toolsCapable: true,
     free: false,
   };
@@ -163,7 +164,7 @@ test("estimateReviewCost: computes cost for paid models", async () => {
     id: "test/agg",
     name: "Agg",
     contextLength: 200000,
-    pricing: { prompt: "15", completion: "75" },
+    pricing: { prompt: "0.000015", completion: "0.000075" },
     toolsCapable: true,
     free: false,
   };
@@ -171,8 +172,11 @@ test("estimateReviewCost: computes cost for paid models", async () => {
   assert.ok(cost > 0, `cost should be > 0, got ${cost}`);
   assert.ok(tokens > 0);
   // 2 reviewers × (14k input + 4k output) + aggregator (10k input + 2k output) = 44k tokens
+  // per-token: prompt=$0.000015, completion=$0.000075 → per-1M: $15, $75
   // cost = (28000/1M * 15) + (8000/1M * 75) + (10000/1M * 15) + (2000/1M * 75) = 0.42 + 0.6 + 0.15 + 0.15 = 1.32
   assert.ok(cost < 5, `cost should be reasonable, got ${cost}`);
+  // With the per-token-to-per-1M conversion, cost should be ~1.32
+  assert.ok(cost > 1.0, `cost should be > 1.0 with realistic pricing, got ${cost}`);
 });
 
 function mkTask(extra: Partial<ReviewTask> = {}): ReviewTask {

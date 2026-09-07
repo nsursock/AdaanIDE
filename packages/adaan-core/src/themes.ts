@@ -127,11 +127,74 @@ export const THEMES: Record<ThemeId, ThemePalette> = {
       operator: "#859900",
     },
   },
+  cottonCandy: {
+    id: "cottonCandy",
+    name: "Cotton Candy",
+    base: {
+      bg: "#fbdce2",
+      surface: "#fff5f8",
+      accent: "#ff9fb2",
+      text: "#4a3b4a",
+      muted: "#b0a0b0",
+    },
+    syntax: {
+      keyword: "#e87b95",
+      string: "#0acdff",
+      comment: "#b0a0b0",
+      number: "#60ab9a",
+      variable: "#4a3b4a",
+      function: "#2b9fd6",
+      type: "#4a8b7a",
+      operator: "#c98ba0",
+    },
+  },
+  goldenTwilight: {
+    id: "goldenTwilight",
+    name: "Golden Twilight",
+    base: {
+      bg: "#000814",
+      surface: "#001d3d",
+      accent: "#ffd60a",
+      text: "#f0e8c8",
+      muted: "#5a7a9a",
+    },
+    syntax: {
+      keyword: "#ffc300",
+      string: "#ffd60a",
+      comment: "#5a7a9a",
+      number: "#ffd60a",
+      variable: "#f0e8c8",
+      function: "#ffc300",
+      type: "#0acdff",
+      operator: "#c8a800",
+    },
+  },
+  brightContrasts: {
+    id: "brightContrasts",
+    name: "Bright Contrasts",
+    base: {
+      bg: "#f8ffe5",
+      surface: "#ffffff",
+      accent: "#ef476f",
+      text: "#2d3a2d",
+      muted: "#8a9a8a",
+    },
+    syntax: {
+      keyword: "#ef476f",
+      string: "#06d6a0",
+      comment: "#8a9a8a",
+      number: "#ffc43d",
+      variable: "#2d3a2d",
+      function: "#1b9aaa",
+      type: "#06d6a0",
+      operator: "#ef476f",
+    },
+  },
 };
 
 export const DEFAULT_THEME: ThemeId = "retrowave";
 
-export const THEME_IDS: ThemeId[] = ["retrowave", "ghibli", "fiesta", "dawn", "synthwave84", "solarizedDark"];
+export const THEME_IDS: ThemeId[] = ["retrowave", "ghibli", "fiesta", "dawn", "synthwave84", "solarizedDark", "cottonCandy", "goldenTwilight", "brightContrasts"];
 
 export function getTheme(id: ThemeId): ThemePalette {
   return THEMES[id] ?? THEMES[DEFAULT_THEME];

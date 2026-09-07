@@ -16,14 +16,17 @@ import {
  *
  * Every row carries `n` and `lowConfidence` so the UI can dim under-sampled
  * models. */
-export async function GET() {
+export async function GET({ url }) {
   try {
     await telemetryStore.load();
     await modelRegistry.load();
     await learnedStats.load();
 
+    const root = url.searchParams.get("root") ?? undefined;
     const data = (telemetryStore as any)._data();
-    const tasks = data.recentTasks ?? [];
+    const tasks = root
+      ? (data.recentTasks ?? []).filter((t: any) => t.workspaceRoot === root)
+      : (data.recentTasks ?? []);
     const modelRows = computeModelTable(tasks);
 
     // Index registry entries by model id for tier/pricing lookup.

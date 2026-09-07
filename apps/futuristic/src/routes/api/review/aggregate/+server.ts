@@ -1,13 +1,12 @@
 import { json } from "@sveltejs/kit";
 import {
   reviewStore,
-  runAggregateOnly,
+  reviewRunManager,
   getProvider,
   getWorkspace,
-  registerRun,
-  unregisterRun,
   type ReviewConfig,
 } from "@adaan/core/server";
+import { runEventStream } from "$lib/server/run-stream";
 
 /** POST /api/review/aggregate — run ONLY the aggregator/judge on pre-existing
  *  reviewer outputs. Skips the committee phase entirely.
@@ -20,7 +19,8 @@ import {
  *    aggregatorModel?: string,   // override aggregator model
  *  }
  *
- *  Streams ReviewProgress events (aggregator/reasoning/parse/complete). */
+ *  Streams ReviewProgress events (aggregator/reasoning/parse/complete). Runs
+ *  are detached from the request lifecycle (see run manager). */
 export async function POST({ request }) {
   let body: {
     configId?: string;
@@ -72,47 +72,15 @@ export async function POST({ request }) {
     );
   }
 
-  const abortCtrl = new AbortController();
-  const runId = `agg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  registerRun(runId, abortCtrl);
-
-  const encoder = new TextEncoder();
-  const readable = new ReadableStream({
-    async start(streamCtrl) {
-      const send = (ev: unknown) => {
-        try {
-          streamCtrl.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
-        } catch { /* streamCtrl closed */ }
-      };
-      try {
-        const gen = runAggregateOnly({
-          config,
-          workspace,
-          provider,
-          reviewerOutputs: body.reviewerOutputs!,
-          aggregatorModel: body.aggregatorModel,
-          signal: abortCtrl.signal,
-          onResultUpdate: async (result) => {
-            await reviewStore.updateResult(result);
-          },
-        });
-        for await (const ev of gen) {
-          send(ev);
-        }
-      } catch (e) {
-        send({ phase: "error", message: e instanceof Error ? e.message : String(e) });
-      } finally {
-        unregisterRun(runId);
-      }
-      try { streamCtrl.close(); } catch { /* already closed */ }
-    },
+  const { resultId } = reviewRunManager.startAggregateRun({
+    config,
+    workspace,
+    provider,
+    reviewerOutputs: body.reviewerOutputs!,
+    aggregatorModel: body.aggregatorModel,
   });
 
-  return new Response(readable, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
-  });
+  const stream = runEventStream(resultId);
+  if (!stream) return json({ error: "run failed to start" }, { status: 500 });
+  return stream;
 }

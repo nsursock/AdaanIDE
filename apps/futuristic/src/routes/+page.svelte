@@ -352,7 +352,7 @@
 
       <!-- Mode-specific content -->
       {#if mode === "stats"}
-        <StatsView />
+        <StatsView {workspaceRoot} />
       {:else if mode === "agent"}
         <!-- Agent mode: left chat (resizable), top-right GitHub, bottom-right terminal -->
         <div class="flex-1 flex overflow-hidden gap-1 p-1" style="background: rgba(var(--bg-deep-rgb), 0.4);">

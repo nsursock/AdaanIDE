@@ -205,7 +205,18 @@ export class OpenRouterProvider implements LLMProvider {
     // An explicitly empty pool means "no failover" — respect that and never
     // hit the network for a live catalog fallback.
     const poolEnabled = this.freePool.length > 0;
-    const maxAttempts = poolEnabled ? this.freePool.length + LIVE_FALLBACK_LIMIT : 1;
+    // When the user explicitly selected a paid model, do NOT silently fall
+    // back to free-tier models on transient errors. The user chose a paid
+    // model for its quality/capabilities — silently downgrading to a free
+    // model defeats that intent and produces misleading output stored under
+    // the paid model's name. Instead, retry the same model once (above) and
+    // then surface the error so the caller can handle it visibly.
+    const isPaidModel = !initialModel.endsWith(":free") && !this.freePool.includes(initialModel);
+    const maxAttempts = isPaidModel
+      ? 1 // same-model retry only, no free-tier fallback
+      : poolEnabled
+        ? this.freePool.length + LIVE_FALLBACK_LIMIT
+        : 1;
     let attempts = 0;
 
     while (attempts < maxAttempts) {
@@ -262,10 +273,13 @@ export class OpenRouterProvider implements LLMProvider {
           // effectively unavailable right now — let the caller offer the
           // user a paid fallback instead of just reporting a dead end.
           const allTriedWereFree = [...tried].every((m) => m.endsWith(":free"));
+          const msg = isPaidModel
+            ? `${initialModel} failed (${e.message ?? statusCode}). Paid model selected — no free-tier fallback.`
+            : e.message ?? "Unknown provider error";
           yield {
             type: "error",
             data: {
-              message: e.message ?? "Unknown provider error",
+              message: msg,
               statusCode,
               retryable: false,
               allFreeModelsExhausted: allTriedWereFree && tried.size > 1,
@@ -355,6 +369,7 @@ export class OpenRouterProvider implements LLMProvider {
     }
     if (options.temperature !== undefined) body.temperature = options.temperature;
     if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens;
+    if (options.sessionId) body.session_id = options.sessionId;
 
     // Combine the caller's abort signal (user cancel) with an internal idle
     // timer: if we go STREAM_IDLE_TIMEOUT_MS without receiving any bytes —
@@ -374,11 +389,16 @@ export class OpenRouterProvider implements LLMProvider {
     // Hard per-attempt deadline — fires regardless of idle signals. A
     // stalled stream that keeps re-arming the idle timer with partial data:
     // lines or keep-alive comments will still be killed at this point.
+    // The caller can override the default via options.deadlineMs (used by
+    // the review runner, which sends large prompts that take longer).
+    const deadline = options.deadlineMs && options.deadlineMs > 0
+      ? options.deadlineMs
+      : STREAM_HARD_DEADLINE_MS;
     const requestStart = Date.now();
     const hardDeadlineTimer = setTimeout(() => {
       hardDeadlineHit = true;
       internalController.abort();
-    }, STREAM_HARD_DEADLINE_MS);
+    }, deadline);
     const onUserAbort = () => internalController.abort();
     if (options.signal) {
       if (options.signal.aborted) internalController.abort();
@@ -408,7 +428,7 @@ export class OpenRouterProvider implements LLMProvider {
     } catch (e: any) {
       cleanupTimer();
       if (hardDeadlineHit) {
-        const err = new Error(`Model ${options.model} exceeded hard deadline (${STREAM_HARD_DEADLINE_MS}ms) — failing over`);
+        const err = new Error(`Model ${options.model} exceeded hard deadline (${deadline}ms) — failing over`);
         (err as any).statusCode = 503;
         throw err;
       }
@@ -471,7 +491,7 @@ export class OpenRouterProvider implements LLMProvider {
           reasoningTokens: json.usage.completion_tokens_details?.reasoning_tokens ?? json.usage.reasoning_tokens ?? 0,
           cost: typeof json.usage.cost === "number" ? json.usage.cost : 0,
         } : undefined;
-        yield { type: "finish", data: { finishReason: mapFinishReason(choice?.finish_reason ?? "stop"), model: options.model, usage } };
+        yield { type: "finish", data: { finishReason: mapFinishReason(choice?.finish_reason ?? "stop"), model: options.model, usage, generationId: json.id } };
       } catch (e) {
         throw new Error(`Failed to parse non-streaming response from ${options.model}: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -490,6 +510,10 @@ export class OpenRouterProvider implements LLMProvider {
     let finishReason: string = "stop";
     let streamDone = false;
     let producedText = false;
+    // OpenRouter includes the generation ID ("gen-...") in every SSE chunk.
+    // Capture it so callers can query GET /generation?id=... for per-generation
+    // metadata (provider, latency, TTFT, tokens, cost, routing).
+    let generationId: string | undefined;
     // Accumulate raw data payloads for fallback parsing if the SSE stream
     // produces no text (some models return content in unexpected fields or
     // a single non-standard chunk).
@@ -513,7 +537,7 @@ export class OpenRouterProvider implements LLMProvider {
           ({ done, value } = await reader.read());
         } catch (e: any) {
           if (hardDeadlineHit) {
-            const err = new Error(`Model ${options.model} exceeded hard deadline (${STREAM_HARD_DEADLINE_MS}ms) — failing over`);
+            const err = new Error(`Model ${options.model} exceeded hard deadline (${deadline}ms) — failing over`);
             (err as any).statusCode = 503;
             throw err;
           }
@@ -575,6 +599,12 @@ export class OpenRouterProvider implements LLMProvider {
               const errMsg = chunk.error.message ?? chunk.error ?? "Unknown stream error";
               yield { type: "error", data: { message: `Model ${options.model}: ${errMsg}` } };
               continue;
+            }
+            // Capture the generation ID from the first chunk that has one.
+            // OpenRouter includes it in every chunk, so this resolves on the
+            // first data event.
+            if (!generationId && typeof chunk.id === "string" && chunk.id.startsWith("gen-")) {
+              generationId = chunk.id;
             }
             const choice = chunk.choices?.[0];
             if (!choice) {
@@ -765,6 +795,7 @@ export class OpenRouterProvider implements LLMProvider {
         finishReason: mapFinishReason(finishReason),
         model: options.model,
         usage,
+        generationId,
       },
     };
   }

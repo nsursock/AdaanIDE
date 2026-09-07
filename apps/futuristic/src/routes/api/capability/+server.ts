@@ -17,15 +17,20 @@ import {
  * Bug fix: previously read `_data().tasks` which doesn't exist on
  * TelemetryData (only `recentTasks`), so the organic matrix was always
  * empty. Now reads `recentTasks` correctly. */
-export async function GET() {
+export async function GET({ url }) {
   try {
     await telemetryStore.load();
+    const root = url.searchParams.get("root") ?? undefined;
     const results = await benchmarkRunner.loadResults();
     const data = (telemetryStore as any)._data();
     const rollups = data?.rollups ?? {};
 
     // FIX: read recentTasks (not the nonexistent `tasks` field).
-    const taskRecords = (data?.recentTasks ?? []).map((t: any) => ({
+    const allTasks = data?.recentTasks ?? [];
+    const wsTasks = root
+      ? allTasks.filter((t: any) => t.workspaceRoot === root)
+      : allTasks;
+    const taskRecords = wsTasks.map((t: any) => ({
       prompt: t.prompt ?? "",
       model: t.model ?? "",
       status: t.status ?? "",
@@ -35,7 +40,7 @@ export async function GET() {
     const matrix = buildCapabilityMatrix(results, rollups, taskRecords);
 
     // Phase 6: organic matrix with N first-class + lowConfidence.
-    const organic = computeModelMatrix(data?.recentTasks ?? []);
+    const organic = computeModelMatrix(wsTasks);
 
     return json({ matrix, organic });
   } catch (e) {

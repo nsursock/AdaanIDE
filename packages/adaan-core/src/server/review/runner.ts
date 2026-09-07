@@ -21,6 +21,12 @@ const execAsync = promisify(exec);
 
 function estTokens(s: string): number { return Math.ceil(s.length / 4); }
 
+/** Default per-request deadline for review LLM calls. Review prompts are
+ *  large (10k+ tokens of project context + committee instructions) and
+ *  reasoning models can take 3-5 minutes. This is longer than the agent
+ *  chat default (180s) because a review is a batch job, not interactive. */
+const DEFAULT_REVIEW_TIMEOUT_MS = 300_000; // 5 minutes
+
 const KEY_FILE_NAMES = [
   "package.json", "tsconfig.json", "pyproject.toml", "setup.py", "requirements.txt",
   "Cargo.toml", "go.mod", "README.md", "README", "AGENTS.md", "CLAUDE.md",
@@ -76,27 +82,76 @@ async function gatherContext(workspace: Workspace, targetPath: string | undefine
   return { text, tokens: estTokens(text) };
 }
 
-/** Build the committee prompt. The expertise level is prepended to each lens. */
+/** Map expertise tiers to concrete behavioral descriptors — percentile claims
+ *  shift tone more than correctness, so we describe experience and behavior
+ *  instead (Claude + DeepSeek consensus). */
+const EXPERTISE_PROMPT_MAP: Record<ExpertiseLevel, string> = {
+  "top-0.1%": "You have 20+ years of deep production experience in your discipline. You've reviewed thousands of codebases and catch subtle defects that pass standard review — race conditions, off-by-one errors in numerical code, silent data corruption paths, and architectural decisions that fail under load",
+  "top-1%": "You have 15+ years of production experience in your discipline. You catch non-obvious defects that a senior engineer might miss, including edge cases, concurrency issues, and silent failure modes",
+  "top-10%": "You have 10+ years of production experience in your discipline. You identify concrete defects with clear failure scenarios, focusing on issues that would cause production incidents",
+  "top-25%": "You have 5+ years of production experience in your discipline. You identify clear, well-evidenced defects with concrete failure scenarios",
+};
+
+/** Build the committee prompt. The expertise level is mapped to behavioral
+ *  descriptors and prepended to each lens. */
 export function buildCommitteePrompt(config: ReviewConfig, context: string): string {
+  const expertiseDesc = EXPERTISE_PROMPT_MAP[config.expertise] ?? EXPERTISE_PROMPT_MAP["top-1%"];
+
   const lenses = config.lenses
-    .map((l, i) => `${i + 1}. ${l.emoji} **${l.label}**: You're a ${config.expertise} ${l.role || l.label.toLowerCase()}. Criticise this project.`)
+    .map((l, i) => {
+      const role = l.role || l.label.toLowerCase();
+      const code = lensCode(l);
+      return `${i + 1}. ${l.emoji} **${l.label}** (${code}): ${expertiseDesc} as a ${role}. Focus exclusively on ${role} concerns — do not report generic style or architecture issues unless they directly cause a ${role} defect.`;
+    })
     .join("\n");
 
   const scope = config.targetPath ? ` Limit the review to the path \`${config.targetPath}\`.` : "";
 
-  return `Perform a rigorous, multi-perspective committee code review of the project.${scope}
+  const lensCodes = config.lenses.map((l) => lensCode(l));
+  const lensCodeHint = lensCodes.slice(0, 3).map((c) => `"${c}"`).join(", ");
 
-First, map the project: identify the entry points and understand the architecture, data flow, and core logic. Then analyze the code sequentially through these specialized lenses, each taking their role seriously, and provide explicit, actionable fixes for each:
+  return `Perform a rigorous, multi-perspective committee code review of the project.${scope} You are reviewing code that will run in production — bugs will cost real money.
+
+A project map (file tree + key file contents) is provided below. Use it to ground your analysis — do not waste effort re-deriving the architecture.
+
+OUTPUT CONSTRAINT — CRITICAL:
+- Do NOT repeat, echo, quote, or reproduce the provided project code in your output. The user already has the code.
+- Produce ONLY your analysis, findings, and the final priority table.
+- Reference files and symbols by name (e.g. "In scripts/data.py, the volatility computation…") — never paste the source code back.
+
+Analyze the code sequentially through these specialized lenses:
 
 ${lenses}
 
-End with a prioritized action list using ONLY P0, P1, P2, P3 (do NOT invent P4 or higher) across all lenses, ordered by risk-to-reward impact. Use exactly this table format as the final section, under a \`## Priority list\` heading:
+EVIDENCE RULES (apply to every lens):
+- Report only findings supported by concrete evidence in the supplied code, configuration, tests, or logs. Do not invent behavior that is not established by the project.
+- Do not infer missing implementation details as facts. If evidence is insufficient, mark the concern as unverified rather than presenting it as a finding.
+- Do not report generic best practices unless they address a concrete problem in this project.
+- Reviewer intuition is not evidence.
+- It is valid to return zero findings. Do not manufacture findings to fill the table.
+
+FINDING QUALITY:
+For every finding, follow this reasoning structure:
+  evidence → mechanism → consequence → fix
+Identify the concrete code evidence, explain the mechanism that causes the problem, describe the practical consequence (a concrete failure scenario — what breaks in production?), and propose the smallest appropriate corrective action.
+
+Distinguish confirmed defects (the code provably does the wrong thing) from risks (likely but not verified) and improvements (valid engineering, but not a defect).
+
+End with a prioritized action list using ONLY P0, P1, P2, P3 (do NOT invent P4 or higher) across all lenses. Prioritize by severity, likelihood, affected scope, and consequence — a speculative optimization must never outrank a confirmed correctness defect. Do not assign priority based on how interesting or sophisticated a finding is.
+
+Use exactly this table format as the final section, under a \`## Priority list\` heading:
 
 ## Priority list
 
 | Priority | Issue | Main finding | Fix | Lens(es) | Reviewer(s) | Impact |
 | --- | --- | --- | --- | --- | --- | --- |
-| P0 | {3–5 words} | {1–2 sentences, concrete} | {1 sentence, actionable} | {comma-separated lens ids} | {comma-separated reviewer models} | {8–12 words} |
+| P0 | {concise title} | {evidence + mechanism, concrete} | {actionable fix} | {comma-separated lens short codes, e.g. ${lensCodeHint}} | {your own model name, e.g. Claude, Gemini, GPT} | {concrete real-world consequence} |
+
+Priority definitions:
+- P0 — Critical: correctness, security, or data-integrity failure that makes the system unsafe or unusable.
+- P1 — High: major correctness, reliability, performance, or architectural defect with real-world impact.
+- P2 — Medium: important defect or substantial improvement that should be addressed but doesn't compromise the system fundamentally.
+- P3 — Low: minor defect, maintainability issue, or non-critical optimization.
 
 Here is the project to review:
 
@@ -117,7 +172,6 @@ export function buildAggregatorPrompt(
 
   // Build explicit L-code → label and short-code mapping. Short codes are
   // the user-defined lens codes (or derived from the label when unset).
-  const lensCodeMap = config.lenses.map((l, i) => `L${i + 1} = ${l.label}`).join(", ");
   const lensShortCodes = config.lenses
     .map((l, i) => `L${i + 1} = ${lensCode(l)} (${l.label})`)
     .join(", ");
@@ -141,24 +195,29 @@ export function buildAggregatorPrompt(
     return `${id} → ${clean.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`;
   }).join(", ");
 
-  return `You are the aggregation chair for a committee code review. Below ${reviewerIds.length > 1 ? `are the raw outputs from ${reviewerIds.length} reviewer models` : "is the raw committee output"}. Produce a single, deduplicated, prioritized task list as STRICT JSON — no prose, no markdown fences.
+  return `You are an adversarial adjudicator for a committee code review — not a summarizer. Below ${reviewerIds.length > 1 ? `are the raw outputs from ${reviewerIds.length} reviewer models` : "is the raw committee output"}. Produce a single, deduplicated, prioritized task list as STRICT JSON — no prose, no markdown fences.
 
 Return exactly this shape:
 {
   "tasks": [
     {
       "priority": "P0",
-      "issue": "3-5 words",
-      "mainFinding": "8-12 words — the core problem",
-      "fix": "8-12 words — the proposed solution",
+      "issue": "concise title (one short phrase)",
+      "mainFinding": "one crisp sentence describing the core problem",
+      "fix": "one crisp sentence describing the proposed solution",
       "lenses": ["MLAI","DATA","STAT"],
       "reviewers": ["ChatGPT","Claude"],
-      "impact": "8-12 words",
+      "impact": "one crisp sentence describing the real-world consequence",
+      "type": "bug",
+      "confidence": "high",
       "issueBody": "full markdown issue body — see format below",
-      "labels": ["priority:p0","lens:mlai"]
+      "labels": ["priority:p0","lens:mlai","type:bug"]
     }
   ]
 }
+
+type: one of "bug" (confirmed defect), "risk" (likely but unverified), "improvement" (valid engineering, not a defect). Only "bug" should reach P0.
+confidence: one of "high", "medium", "low" — how well the evidence supports the finding.
 
 issueBody format (MANDATORY — every task must follow this exact structure):
 ## Summary
@@ -179,16 +238,46 @@ issueBody format (MANDATORY — every task must follow this exact structure):
 - [ ] <verifiable criterion 3>
 
 ## References
+- **Type:** <bug|risk|improvement>
+- **Confidence:** <high|medium|low>
 - **Lenses:** <comma-separated lens short codes>
 - **Reviewers:** <comma-separated reviewer names>
 - **Priority:** <P0|P1|P2|P3>
 
-Rules:
-- priority must be one of EXACTLY: P0, P1, P2, P3. Do NOT invent P4, P5, or higher. If a finding doesn't fit P0-P3, use P3.
-- CRITICAL: Merge duplicate findings flagged by multiple lenses or reviewers into ONE task. List ALL lenses and ALL reviewers that flagged it. Never produce two tasks for the same underlying issue.
+EXECUTION ORDER (follow this sequence internally before producing output):
+1. Catalog all candidate findings across all reviewers and cluster duplicates by root cause.
+2. Map every L-code and model ID to its canonical short code and friendly name.
+3. Adjudicate each candidate (verify, classify, prioritize).
+4. Generate the final JSON payload.
+
+ADJUDICATION RULES:
+- Independently verify whether the supplied evidence actually supports each claim. Reject findings whose conclusions depend on assumptions not established by the project context.
+- Reject purely stylistic findings or findings with no concrete code evidence.
+- Two findings are duplicates when they identify the same underlying root cause, even if they describe different symptoms, use different terminology, or appear under different lenses. Merge them into ONE task.
+- Do NOT merge findings merely because they affect the same file, function, or subsystem when their root causes differ. Preserve distinct findings even when they affect the same subsystem.
+- Resolve reviewer disagreement using project evidence, not reviewer majority. Reviewer consensus is evidence of agreement, NOT evidence that the claim is true. A finding must not become more severe merely because multiple reviewers reported it.
+- If reviewers disagree on priority, default to the HIGHER priority. If reviewers disagree on whether something is a bug, classify it as "risk" with confidence "medium".
+
+EVIDENCE HIERARCHY (strongest to weakest):
+1. Executable behavior / tests / logs
+2. Concrete implementation in supplied code
+3. Configuration and documented invariants
+4. Strong architectural inference
+5. Reviewer speculation
+Never present level 4–5 reasoning as a confirmed defect without qualification.
+
+PRIORITY DEFINITIONS:
+- P0 — Critical: correctness, security, or data-integrity failure that makes the system unsafe or unusable. Only "bug" type.
+- P1 — High: major correctness, reliability, performance, or architectural defect with real-world impact.
+- P2 — Medium: important defect or substantial improvement that should be addressed but doesn't compromise the system fundamentally.
+- P3 — Low: minor defect, maintainability issue, or non-critical optimization.
+- Do NOT invent P4 or higher. If a finding doesn't fit P0-P3, use P3.
+- Prioritize by severity, likelihood, affected scope, and consequence. A speculative optimization must never outrank a confirmed correctness defect.
+
+OUTPUT RULES:
 - Order tasks by priority (P0 first).
 - One task entry per finding, with a GitHub-issue-ready body following the format above.
-- mainFinding, fix, and impact MUST each be 8-12 words long. Not shorter, not longer.
+- List ALL lenses and ALL reviewers that flagged a finding in the merged task.
 
 LENS NAMING — CRITICAL:
 - The raw output may use codes like L1, L2, L3, L4, L5, L6, L7. These map to lens short codes and labels by position:
@@ -211,9 +300,9 @@ Parsed-from-table fallback (use as a cross-check, do not blindly copy):
 ${JSON.stringify(fallbackTasks)}`;
 }
 
-async function consumeChat(provider: LLMProvider, messages: ProviderMessage[], model: string, signal?: AbortSignal): Promise<string> {
+async function consumeChat(provider: LLMProvider, messages: ProviderMessage[], model: string, signal?: AbortSignal, deadlineMs?: number): Promise<string> {
   let text = "";
-  for await (const ev of provider.chat(messages, { model, temperature: 0.3, signal })) {
+  for await (const ev of provider.chat(messages, { model, temperature: 0.3, signal, deadlineMs })) {
     if (ev.type === "text.delta") {
       text += (ev.data as { text?: string } | undefined)?.text ?? "";
     } else if (ev.type === "error") {
@@ -230,27 +319,49 @@ export interface ReviewRunOptions {
   triggeredBy?: "manual" | "schedule";
   signal?: AbortSignal;
   onResultUpdate?: (result: ReviewResult) => void | Promise<void>;
+  /** Reuse a specific result id (the run manager owns run identity). */
+  resultId?: string;
+  /** Resume from an interrupted run: reviewers whose output already exists in
+   *  `resumeFrom.rawOutputs` (non-empty, non-error) are skipped instead of
+   *  re-run; their text is carried into the aggregation. */
+  resumeFrom?: ReviewResult;
 }
 
 export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewProgress> {
   const { config, workspace, provider, triggeredBy = "manual" } = opts;
+
+  // Outputs carried over from an interrupted run — these reviewers are NOT
+  // re-called on this pass.
+  const preserved: Record<string, string> = {};
+  for (const [model, text] of Object.entries(opts.resumeFrom?.rawOutputs ?? {})) {
+    if (text && !text.startsWith("[REVIEWER ERROR:")) preserved[model] = text;
+  }
+
   const result: ReviewResult = {
-    id: reviewId("rev-"),
+    id: opts.resumeFrom?.id ?? opts.resultId ?? reviewId("rev-"),
     configId: config.id,
     configName: config.name,
-    startedAt: new Date().toISOString(),
+    startedAt: opts.resumeFrom?.startedAt ?? new Date().toISOString(),
     expertise: config.expertise,
     reviewerModels: [],
     aggregatorModel: "",
     targetPath: config.targetPath,
     tasks: [],
-    rawOutputs: {},
+    rawOutputs: { ...preserved },
     status: "running",
     triggeredBy,
-    source: "review",
+    source: opts.resumeFrom?.source ?? "review",
   };
 
   const persist = async () => { try { await opts.onResultUpdate?.({ ...result }); } catch { /* ignore */ } };
+
+  /** OpenRouter session id — groups all reviewer + aggregator requests
+   *  from this run together in the OpenRouter dashboard for debugging. */
+  const sessionId = `review-${result.id}`;
+
+  // Persist the skeleton immediately so the store reflects "running" even if
+  // the process dies before the first milestone.
+  await persist();
 
   try {
     // 1. Gather context.
@@ -264,10 +375,12 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     result.reviewerModels = reviewerIds;
     result.aggregatorModel = aggregatorModel;
 
-    // Fetch all models to find the aggregator's pricing.
+    // Fetch all models to find the aggregator's pricing. Try exact match
+    // first, then prefix match (catalog slugs often have date suffixes).
     const { free, paid } = await fetchModelsByTier(provider);
     const allModels = [...free, ...paid];
-    const aggModelInfo = findModel(allModels, aggregatorModel);
+    const aggModelInfo = findModel(allModels, aggregatorModel)
+      ?? allModels.find((m) => m.id.startsWith(aggregatorModel + "-") || m.id.startsWith(aggregatorModel));
 
     const { cost, tokens } = estimateReviewCost(reviewerModelInfos, aggModelInfo, contextTokens, reviewerIds.length);
     result.estimatedCost = cost;
@@ -278,7 +391,7 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     // 3. Run committee across all reviewers in parallel.
     const committeePrompt = buildCommitteePrompt(config, context);
     const committeeMessages: ProviderMessage[] = [
-      { role: "system", content: "You are a meticulous, senior committee of reviewers. Be concrete and actionable. Always end with the priority table in the exact requested format." },
+      { role: "system", content: "You are a rigorous software-review committee reviewing code that will run in production. Be evidence-driven, skeptical, concrete, and actionable. Report only findings supported by the supplied project evidence. Do not invent behavior or manufacture findings. Distinguish confirmed defects from risks and recommendations. Explain the causal mechanism behind every defect. It is valid to return zero findings. Prioritize correctness and real-world impact over stylistic preferences." },
       { role: "user", content: committeePrompt },
     ];
 
@@ -290,8 +403,20 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
       reviewerCount: reviewerIds.length,
     };
 
-    // Emit a start event per reviewer so the UI can show status cards.
+    // Reviewers carried over from an interrupted run emit begin+done
+    // immediately (their text is already in result.rawOutputs and comes back
+    // to attaching clients via the manager's replay).
+    const pendingModels = reviewerIds.filter((m) => !(m in preserved));
     for (let i = 0; i < reviewerIds.length; i++) {
+      const model = reviewerIds[i];
+      if (pendingModels.includes(model)) continue;
+      yield { phase: "committee.start", model, reviewerIndex: i, reviewerCount: reviewerIds.length };
+      yield { phase: "committee.done", model, reviewerIndex: i };
+    }
+
+    // Emit a start event per pending reviewer so the UI can show status cards.
+    for (let i = 0; i < reviewerIds.length; i++) {
+      if (!pendingModels.includes(reviewerIds[i])) continue;
       yield { phase: "committee.start", model: reviewerIds[i], reviewerIndex: i, reviewerCount: reviewerIds.length };
     }
 
@@ -299,6 +424,7 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     // queue + drain pattern. Each reviewer promise pushes deltas; the main
     // generator loop yields them as they arrive.
     const deltaQueue: { model: string; reviewerIndex: number; text: string }[] = [];
+    const queuedQueue: { model: string; reviewerIndex: number }[] = [];
     let deltaNotify: (() => void) | null = null;
     let reviewersDone = false;
 
@@ -307,42 +433,74 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
       deltaNotify?.();
     };
 
-    const reviewerPromises = reviewerIds.map(async (model, index) => {
-      try {
-        let text = "";
-        for await (const ev of provider.chat(committeeMessages, { model, temperature: 0.3, signal: opts.signal })) {
-          if (ev.type === "text.delta") {
-            const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
-            text += chunk;
-            pushDelta(model, index, chunk);
-          } else if (ev.type === "error") {
-            throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Provider error");
+    const pushQueued = (model: string, reviewerIndex: number) => {
+      queuedQueue.push({ model, reviewerIndex });
+      deltaNotify?.();
+    };
+
+    const reviewerPromises = reviewerIds
+      .map((model, index) => ({ model, index }))
+      .filter(({ model }) => pendingModels.includes(model))
+      .map(async ({ model, index }) => {
+        try {
+          let text = "";
+          let started = false;
+          for await (const ev of provider.chat(committeeMessages, { model, temperature: 0.3, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
+            if (ev.type === "text.delta") {
+              const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
+              text += chunk;
+              started = true;
+              pushDelta(model, index, chunk);
+            } else if (ev.type === "provider.queued") {
+              // OpenRouter sends PROCESSING keep-alives throughout the stream,
+              // not just before the first token. Only surface the queued state
+              // before any text has arrived — afterwards it's just noise.
+              if (!started) pushQueued(model, index);
+            } else if (ev.type === "finish") {
+              const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
+              if (genId) {
+                result.generationIds ??= {};
+                result.generationIds[model] = genId;
+              }
+            } else if (ev.type === "error") {
+              throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Provider error");
+            }
           }
+          result.rawOutputs[model] = text;
+          // Persist after every reviewer so an interruption (quit/restart)
+          // keeps the completed work — resume skips already-done reviewers.
+          await persist();
+          return { model, raw: text, index, error: null as string | null };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          result.rawOutputs[model] = `[REVIEWER ERROR: ${msg}]`;
+          return { model, raw: "", index, error: msg };
         }
-        result.rawOutputs[model] = text;
-        return { model, raw: text, index, error: null as string | null };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        result.rawOutputs[model] = `[REVIEWER ERROR: ${msg}]`;
-        return { model, raw: "", index, error: msg };
-      }
-    });
+      });
 
     const allSettledPromise = Promise.allSettled(reviewerPromises);
     allSettledPromise.then(() => { reviewersDone = true; deltaNotify?.(); });
 
-    // Yield deltas as they arrive until all reviewers settle.
+    // Yield deltas and queue events as they arrive until all reviewers settle.
     while (!reviewersDone) {
-      if (deltaQueue.length === 0) {
+      if (deltaQueue.length === 0 && queuedQueue.length === 0) {
         await new Promise<void>((r) => { deltaNotify = r; });
         deltaNotify = null;
+      }
+      while (queuedQueue.length > 0) {
+        const q = queuedQueue.shift()!;
+        yield { phase: "committee.queued", model: q.model, reviewerIndex: q.reviewerIndex, reviewerCount: reviewerIds.length };
       }
       while (deltaQueue.length > 0) {
         const d = deltaQueue.shift()!;
         yield { phase: "committee.delta", model: d.model, reviewerIndex: d.reviewerIndex, text: d.text };
       }
     }
-    // Drain any remaining deltas.
+    // Drain any remaining events.
+    while (queuedQueue.length > 0) {
+      const q = queuedQueue.shift()!;
+      yield { phase: "committee.queued", model: q.model, reviewerIndex: q.reviewerIndex, reviewerCount: reviewerIds.length };
+    }
     while (deltaQueue.length > 0) {
       const d = deltaQueue.shift()!;
       yield { phase: "committee.delta", model: d.model, reviewerIndex: d.reviewerIndex, text: d.text };
@@ -382,20 +540,33 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     yield { phase: "aggregator", message: "Aggregating findings…", model: aggregatorModel };
     const aggPrompt = buildAggregatorPrompt(config, successfulOutputs, fallbackTasks, aggregatorModel);
     const aggMessages: ProviderMessage[] = [
-      { role: "system", content: "You return ONLY a JSON object, no prose, no markdown fences." },
+      { role: "system", content: "You are an adversarial adjudicator for a committee code review. You verify findings against evidence, reject unsupported claims, and resolve disagreements from the code rather than by reviewer vote. You return ONLY a JSON object, no prose, no markdown fences." },
       { role: "user", content: aggPrompt },
     ];
     let aggRaw = "";
     let aggReasoning = "";
-    for await (const ev of provider.chat(aggMessages, { model: aggregatorModel, temperature: 0.3, signal: opts.signal })) {
+    let aggStarted = false;
+    for await (const ev of provider.chat(aggMessages, { model: aggregatorModel, temperature: 0.3, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
       if (ev.type === "text.delta") {
         const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
         aggRaw += chunk;
+        aggStarted = true;
         yield { phase: "aggregator.delta", text: chunk };
       } else if (ev.type === "reasoning.delta") {
         const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
         aggReasoning += chunk;
+        aggStarted = true;
         yield { phase: "aggregator.reasoning", text: chunk };
+      } else if (ev.type === "provider.queued") {
+        // Suppress keep-alive queue events after output has started —
+        // OpenRouter intersperses them between reasoning/text chunks.
+        if (!aggStarted) yield { phase: "aggregator.queued", model: aggregatorModel };
+      } else if (ev.type === "finish") {
+        const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
+        if (genId) {
+          result.generationIds ??= {};
+          result.generationIds[aggregatorModel] = genId;
+        }
       } else if (ev.type === "error") {
         throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Aggregator error");
       }
@@ -493,6 +664,11 @@ export interface AggregateOnlyOptions {
   aggregatorModel?: string;
   signal?: AbortSignal;
   onResultUpdate?: (result: ReviewResult) => void | Promise<void>;
+  /** Reuse a specific result id (the run manager owns run identity — used
+   *  when resuming an interrupted upload run). */
+  resultId?: string;
+  /** Resuming an interrupted run — keeps its original start time. */
+  resumeFrom?: ReviewResult;
 }
 
 /**
@@ -513,10 +689,10 @@ export async function* runAggregateOnly(opts: AggregateOnlyOptions): AsyncIterab
   }
 
   const result: ReviewResult = {
-    id: reviewId("rev-"),
+    id: opts.resumeFrom?.id ?? opts.resultId ?? reviewId("rev-"),
     configId: config.id,
     configName: config.name,
-    startedAt: new Date().toISOString(),
+    startedAt: opts.resumeFrom?.startedAt ?? new Date().toISOString(),
     triggeredBy: "manual",
     expertise: config.expertise,
     reviewerModels: Object.keys(reviewerOutputs),
@@ -533,6 +709,12 @@ export async function* runAggregateOnly(opts: AggregateOnlyOptions): AsyncIterab
 
   const persist = async () => { await opts.onResultUpdate?.(result); };
 
+  /** OpenRouter session id for the upload-judge path. */
+  const sessionId = `review-${result.id}`;
+
+  // Persist the skeleton immediately (see runReview).
+  await persist();
+
   try {
     // 1. Parse priority tables from each reviewer (fallback).
     yield { phase: "parse", message: "Parsing uploaded outputs…" };
@@ -548,20 +730,33 @@ export async function* runAggregateOnly(opts: AggregateOnlyOptions): AsyncIterab
     yield { phase: "aggregator", message: "Aggregating findings…", model: aggregatorModel };
     const aggPrompt = buildAggregatorPrompt(config, reviewerOutputs, fallbackTasks, aggregatorModel);
     const aggMessages: ProviderMessage[] = [
-      { role: "system", content: "You return ONLY a JSON object, no prose, no markdown fences." },
+      { role: "system", content: "You are an adversarial adjudicator for a committee code review. You verify findings against evidence, reject unsupported claims, and resolve disagreements from the code rather than by reviewer vote. You return ONLY a JSON object, no prose, no markdown fences." },
       { role: "user", content: aggPrompt },
     ];
     let aggRaw = "";
     let aggReasoning = "";
-    for await (const ev of provider.chat(aggMessages, { model: aggregatorModel, temperature: 0.3, signal: opts.signal })) {
+    let aggStarted = false;
+    for await (const ev of provider.chat(aggMessages, { model: aggregatorModel, temperature: 0.3, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
       if (ev.type === "text.delta") {
         const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
         aggRaw += chunk;
+        aggStarted = true;
         yield { phase: "aggregator.delta", text: chunk };
       } else if (ev.type === "reasoning.delta") {
         const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
         aggReasoning += chunk;
+        aggStarted = true;
         yield { phase: "aggregator.reasoning", text: chunk };
+      } else if (ev.type === "provider.queued") {
+        // Suppress keep-alive queue events after output has started —
+        // OpenRouter intersperses them between reasoning/text chunks.
+        if (!aggStarted) yield { phase: "aggregator.queued", model: aggregatorModel };
+      } else if (ev.type === "finish") {
+        const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
+        if (genId) {
+          result.generationIds ??= {};
+          result.generationIds[aggregatorModel] = genId;
+        }
       } else if (ev.type === "error") {
         throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Aggregator error");
       }
