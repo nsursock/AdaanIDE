@@ -330,6 +330,7 @@ export type ProviderEventType =
   | "model.fallback"
   | "model.retry"
   | "provider.queued"
+  | "provider.started"
   | "error";
 
 export interface ProviderEvent {

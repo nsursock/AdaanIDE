@@ -49,6 +49,7 @@
     ReviewTask,
     ReviewPreset,
     ExpertiseLevel,
+    GenerationMetadata,
   } from "@adaan/core/server";
 
   // The barrel exports two `ModelTier` types (registry + review) — use the
@@ -64,6 +65,13 @@
   let freeModels = $state<{ id: string; name: string; paramSize?: string }[]>([]);
   let paidModels = $state<{ id: string; name: string; paramSize?: string }[]>([]);
   let localModels = $state<{ id: string; name: string; providerName?: string }[]>([]);
+  /** Model popularity from OpenRouter rankings-daily: permaslug → total
+   *  tokens over the last 7 days. Fetched once on mount, used to sort paid
+   *  models by popularity so users know which are worth the dollar. */
+  let popularity = $state<Map<string, number>>(new Map());
+  let popularityLoading = $state(false);
+  /** "popular" = sort by popularity (default for paid), "all" = catalog order. */
+  let modelSort = $state<"popular" | "all">("popular");
   let selectedConfigId = $state<string | null>(null);
   let selectedResultId = $state<string | null>(null);
   let selectedResult = $state<(ReviewResult & { tasks: ReviewTask[] }) | null>(null);
@@ -146,6 +154,15 @@
   /** Full result shown in the raw-output debug modal. */
   let rawResult = $state<ReviewResult | null>(null);
   let rawLoading = $state(false);
+  let genRefreshing = $state(false);
+  /** Generation Audit sort state for the raw-output modal. */
+  let genSortKey = $state<"time" | "role" | "requested" | "actual" | "provider" | "inTok" | "outTok" | "cost" | "finish">("time");
+  let genSortDir = $state<"asc" | "desc">("asc");
+  /** Selected key in the raw-output picker (reviewer / judge reasoning / judge JSON). */
+  let rawSelectedKey = $state<string | null>(null);
+  /** Accordion state for the raw-output modal — only one section open at a time. */
+  let genAuditOpen = $state(true);
+  let rawOutputOpen = $state(false);
   /** Start Fresh modal: selectively wipe configs, reviews, and/or tasks. */
   let showStartFresh = $state(false);
   let startFreshOpts = $state({ configs: true, results: true, taskLists: true });
@@ -245,7 +262,7 @@
   async function loadAll() {
     error = null;
     try {
-      await Promise.all([loadConfigs(), loadResults(), loadScheduler(), loadModels()]);
+      await Promise.all([loadConfigs(), loadResults(), loadScheduler(), loadModels(), loadPopularity()]);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -299,6 +316,9 @@
   /** Open the raw-output debug modal for a run (reviewer texts + judge JSON). */
   async function openRawOutput(id: string) {
     rawLoading = true;
+    rawSelectedKey = null;
+    genAuditOpen = true;
+    rawOutputOpen = false;
     try {
       const res = await fetch(`/api/review/results?id=${encodeURIComponent(id)}`);
       if (res.ok) {
@@ -309,6 +329,26 @@
       }
     } finally {
       rawLoading = false;
+    }
+  }
+
+  /** Fetch generation metadata from OpenRouter for the open raw-output run.
+   *  Backfills older runs that didn't auto-enrich, or refreshes stale data. */
+  async function refreshGenerationMetadata() {
+    if (!rawResult) return;
+    genRefreshing = true;
+    try {
+      const res = await fetch(`/api/review/generations?id=${encodeURIComponent(rawResult.id)}`);
+      if (res.ok) {
+        const { metadata, actualCost, actualTokens } = await res.json();
+        if (metadata && Object.keys(metadata).length > 0) {
+          rawResult = { ...rawResult, generationMetadata: metadata, actualCost, actualTokens };
+          // Also update the matching entry in the results list
+          results = results.map((r) => r.id === rawResult!.id ? { ...r, actualCost, actualTokens } : r);
+        }
+      }
+    } catch { /* best-effort */ } finally {
+      genRefreshing = false;
     }
   }
 
@@ -330,13 +370,29 @@
       `- **Expertise:** ${r.expertise ?? "—"}`,
       `- **Reviewer models:** ${(r.reviewerModels ?? []).join(", ") || "—"}`,
       `- **Aggregator model:** ${r.aggregatorModel || "—"}`,
-      ...(r.estimatedCost != null ? [`- **Estimated cost:** $${r.estimatedCost.toFixed(4)}`] : []),
-      ...(r.estimatedTokens != null ? [`- **Estimated tokens:** ${r.estimatedTokens.toLocaleString()}`] : []),
+      ...(r.actualCost != null ? [`- **Actual cost:** $${r.actualCost.toFixed(4)}`] : r.estimatedCost != null ? [`- **Estimated cost:** $${r.estimatedCost.toFixed(4)}`] : []),
+      ...(r.actualTokens != null ? [`- **Actual tokens:** ${r.actualTokens.toLocaleString()}`] : r.estimatedTokens != null ? [`- **Estimated tokens:** ${r.estimatedTokens.toLocaleString()}`] : []),
       ...(r.targetPath ? [`- **Target path:** \`${r.targetPath}\``] : []),
       "",
       "---",
       "",
     ];
+
+    // Generation audit — what OpenRouter actually routed to
+    const genMeta = Object.entries(r.generationMetadata ?? {});
+    if (genMeta.length > 0) {
+      lines.push("## Generation Audit (OpenRouter)", "");
+      lines.push("| Role | Requested | Actual Model | Provider | In tok | Out tok | Cost | Finish |");
+      lines.push("|---|---|---|---|---|---|---|---|");
+      for (const [key, meta] of genMeta) {
+        const parsed = parseGenerationKey(key, r.aggregatorModel);
+        const mismatch = isRealFailover(parsed.requestedModel, meta.model) ? " ⚠" : "";
+        lines.push(
+          `| ${parsed.role === "aggregator" ? "Judge" : "Reviewer"} | ${parsed.requestedModel} | ${meta.model}${mismatch} | ${meta.providerName ?? "—"} | ${meta.tokensPrompt.toLocaleString()} | ${meta.tokensCompletion.toLocaleString()} | ${meta.totalCost > 0 ? `$${meta.totalCost.toFixed(5)}` : "free"} | ${meta.finishReason ?? "—"} |`,
+        );
+      }
+      lines.push("", "---", "");
+    }
 
     const entries = Object.entries(r.rawOutputs ?? {});
     if (entries.length > 0) {
@@ -358,7 +414,23 @@
       lines.push("## Reviewer Outputs", "", "No reviewer output was captured for this run.", "");
     }
 
-    lines.push("## Judge / Aggregator Output", "");
+    lines.push("## Judge / Aggregator Reasoning", "");
+    if (r.aggregatorReasoning) {
+      lines.push(
+        `**Model:** ${modelLabel(r.aggregatorModel)}`,
+        `**Model ID:** \`${r.aggregatorModel}\``,
+        `**Length:** ${r.aggregatorReasoning.length.toLocaleString()} chars`,
+        "",
+        "```",
+        r.aggregatorReasoning,
+        "```",
+        "",
+      );
+    } else {
+      lines.push("No judge reasoning was captured for this run.", "");
+    }
+
+    lines.push("## Judge / Aggregator JSON Output", "");
     if (r.aggregatorOutput) {
       lines.push(
         `**Model:** ${modelLabel(r.aggregatorModel)}`,
@@ -371,7 +443,7 @@
         "",
       );
     } else {
-      lines.push("Judge output was not captured for this run.", "");
+      lines.push("Judge JSON output was not captured for this run.", "");
     }
 
     const md = lines.join("\n");
@@ -400,6 +472,26 @@
       freeModels = data.free ?? [];
       paidModels = data.paid ?? [];
       localModels = data.local ?? [];
+    }
+  }
+
+  /** Fetch model popularity from OpenRouter rankings-daily (last 7 days).
+   *  Best-effort — silently skips on error. Used to sort paid models so
+   *  users know which are worth the dollar. */
+  async function loadPopularity() {
+    popularityLoading = true;
+    try {
+      const res = await fetch("/api/review/popularity");
+      if (res.ok) {
+        const data = await res.json();
+        const map = new Map<string, number>();
+        for (const m of data.models ?? []) {
+          map.set(m.permaslug, m.tokens);
+        }
+        popularity = map;
+      }
+    } catch { /* best-effort */ } finally {
+      popularityLoading = false;
     }
   }
 
@@ -1146,6 +1238,89 @@
     return s;
   }
 
+  /** True failover detection for the Generation Audit table. OpenRouter's
+   *  catalog often has date-suffixed canonical slugs (e.g. requested
+   *  "openai/gpt-5.6-luna" actually resolves to "openai/gpt-5.6-luna-20260709")
+   *  — that's normal version pinning, NOT a failover to a different model.
+   *  Only flag it when the base model (with any trailing "-YYYYMMDD"-style
+   *  date suffix stripped) genuinely differs. */
+  function isRealFailover(requested: string, actual: string): boolean {
+    if (requested === actual) return false;
+    const stripDateSuffix = (id: string) => id.replace(/-\d{6,8}$/, "");
+    return stripDateSuffix(requested) !== stripDateSuffix(actual);
+  }
+
+  /** Parse a `generationIds`/`generationMetadata` key into its role and
+   *  requested model id. Keys are `reviewer:<model>` / `aggregator:<model>`,
+   *  optionally suffixed with `#<n>` when a model was called more than once
+   *  (e.g. manually reconciled retries) — legacy runs may have bare model
+   *  ids with no prefix at all. */
+  function parseGenerationKey(key: string, aggregatorModel?: string): { role: "reviewer" | "aggregator"; requestedModel: string } {
+    const noAttempt = key.replace(/#\d+$/, "");
+    if (noAttempt.startsWith("reviewer:")) return { role: "reviewer", requestedModel: noAttempt.slice("reviewer:".length) };
+    if (noAttempt.startsWith("aggregator:")) return { role: "aggregator", requestedModel: noAttempt.slice("aggregator:".length) };
+    return { role: noAttempt === aggregatorModel ? "aggregator" : "reviewer", requestedModel: noAttempt };
+  }
+
+  /** Format an ISO timestamp as a compact time (HH:MM:SS) for the audit table. */
+  function fmtTime(s?: string): string {
+    if (!s) return "—";
+    try {
+      return new Date(s).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+    } catch { return s; }
+  }
+
+  /** Sort the Generation Audit entries by the active sort key/direction. */
+  function sortGenEntries(
+    entries: [string, GenerationMetadata][],
+    key: typeof genSortKey,
+    dir: "asc" | "desc",
+  ): [string, GenerationMetadata][] {
+    const mul = dir === "asc" ? 1 : -1;
+    const cmp = (a: number | string, b: number | string) => (a < b ? -1 : a > b ? 1 : 0);
+    return [...entries].sort(([_ka, ma], [_kb, mb]) => {
+      switch (key) {
+        case "time": return mul * cmp(ma.createdAt ?? "", mb.createdAt ?? "");
+        case "role": return mul * cmp(_ka, _kb);
+        case "requested": return mul * cmp(_ka, _kb);
+        case "actual": return mul * cmp(ma.model, mb.model);
+        case "provider": return mul * cmp(ma.providerName ?? "", mb.providerName ?? "");
+        case "inTok": return mul * cmp(ma.tokensPrompt, mb.tokensPrompt);
+        case "outTok": return mul * cmp(ma.tokensCompletion, mb.tokensCompletion);
+        case "cost": return mul * cmp(ma.totalCost, mb.totalCost);
+        case "finish": return mul * cmp(ma.finishReason ?? "", mb.finishReason ?? "");
+        default: return 0;
+      }
+    });
+  }
+
+  /** Cycle sort direction (or set a new key → default asc). Clicking the
+   *  active column toggles asc/desc; clicking a new column starts asc. */
+  function setGenSort(key: typeof genSortKey) {
+    if (genSortKey === key) genSortDir = genSortDir === "asc" ? "desc" : "asc";
+    else { genSortKey = key; genSortDir = "asc"; }
+  }
+
+  /** Build the list of selectable raw outputs for the picker: reviewer
+   *  outputs, judge reasoning, and judge JSON — each with a stable key,
+   *  a label, and the text. */
+  function buildRawOutputs(r: ReviewResult): { key: string; label: string; text: string }[] {
+    const out: { key: string; label: string; text: string }[] = [];
+    for (const [model, text] of Object.entries(r.rawOutputs ?? {})) {
+      const attempt = model.match(/#(\d+)$/)?.[1];
+      const base = model.replace(/#\d+$/, "");
+      const label = `${r.source === "upload" ? "Pasted" : "Reviewer"} · ${modelLabel(base)}${attempt ? ` (attempt ${attempt})` : ""}`;
+      out.push({ key: `raw:${model}`, label, text });
+    }
+    if (r.aggregatorReasoning) {
+      out.push({ key: "judge:reasoning", label: `Judge reasoning · ${modelLabel(r.aggregatorModel)}`, text: r.aggregatorReasoning });
+    }
+    if (r.aggregatorOutput) {
+      out.push({ key: "judge:json", label: `Judge JSON · ${modelLabel(r.aggregatorModel)}`, text: r.aggregatorOutput });
+    }
+    return out;
+  }
+
   /** Build a model id → display name map from the loaded model lists. */
   const modelNameMap = $derived.by(() => {
     const map = new Map<string, string>();
@@ -1240,11 +1415,44 @@
     { id: "all", icon: IconStack, label: "All", desc: "Free + paid" },
   ];
 
-  let availableModels = $derived(
-    editing?.modelTier === "paid" ? paidModels
-    : editing?.modelTier === "free" ? freeModels
-    : [...freeModels, ...paidModels],
-  );
+  let availableModels = $derived.by(() => {
+    const base = editing?.modelTier === "paid" ? paidModels
+      : editing?.modelTier === "free" ? freeModels
+      : [...freeModels, ...paidModels];
+    // Sort by popularity when "popular" is selected (default for paid).
+    // Models with no popularity data sort last but keep their relative order.
+    if (modelSort === "popular" && popularity.size > 0) {
+      return [...base].sort((a, b) => {
+        const pa = modelPopularity(a.id) ?? 0;
+        const pb = modelPopularity(b.id) ?? 0;
+        // Popular first; ties keep catalog order (stable sort).
+        if (pb !== pa) return pb - pa;
+        return base.indexOf(a) - base.indexOf(b);
+      });
+    }
+    return base;
+  });
+
+  /** Look up the popularity (7-day total tokens) for a model id. The
+   *  rankings-daily dataset uses canonical permaslugs, so we try exact match
+   *  first, then prefix match (catalog ids often have date suffixes). */
+  function modelPopularity(id: string): number | undefined {
+    if (popularity.size === 0) return undefined;
+    if (popularity.has(id)) return popularity.get(id);
+    // Try prefix match — e.g. "openai/gpt-4o" matches "openai/gpt-4o-2024-05-13".
+    for (const [slug, tokens] of popularity) {
+      if (slug.startsWith(id + "-") || id.startsWith(slug + "-")) return tokens;
+    }
+    return undefined;
+  }
+
+  /** Format a token count as a compact popularity label (e.g. "12.3M", "450k"). */
+  function fmtPopularity(tokens: number | undefined): string {
+    if (tokens == null) return "";
+    if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+    if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
+    return `${tokens}`;
+  }
 
   let modelSearch = $state("");
 
@@ -1264,6 +1472,18 @@
     } else {
       editing.reviewerModels = [...editing.reviewerModels, id];
     }
+  }
+
+  function rerunJudgeForRawResult() {
+    if (!rawResult) return;
+    const r = rawResult;
+    // Map non-error reviewer outputs to uploadReviewers
+    const entries = Object.entries(r.rawOutputs ?? {}).filter(([, text]) => text && !text.startsWith("[REVIEWER ERROR:"));
+    if (entries.length === 0) return;
+    uploadReviewers = entries.map(([name, text]) => ({ name, text }));
+    uploadConfigId = r.configId;
+    uploadMode = true;
+    rawResult = null;
   }
 
   // --- Upload analysis mode --------------------------------------------------
@@ -2120,7 +2340,13 @@
                     {/if}
                   </td>
                   <td class="col-cost">
-                    <span class="task-reviewers-cell">{fmtCost(r.estimatedCost)}</span>
+                    {#if r.actualCost != null && r.actualCost > 0}
+                      <span class="task-reviewers-cell font-bold" title="Actual cost billed by OpenRouter">{fmtCost(r.actualCost)}</span>
+                    {:else if r.estimatedCost != null && r.estimatedCost > 0}
+                      <span class="task-reviewers-cell opacity-70" title="Estimated cost">{fmtCost(r.estimatedCost)}</span>
+                    {:else}
+                      <span class="task-reviewers-cell">free</span>
+                    {/if}
                   </td>
                   <td class="col-actions">
                     <div class="task-row-actions">
@@ -2177,11 +2403,15 @@
                     +{selectedResult.mergeStats.added} new · {selectedResult.mergeStats.carried} carried · {selectedResult.mergeStats.autoResolved} resolved
                   </span>
                 {/if}
-                {#if selectedResult.estimatedCost != null && selectedResult.estimatedCost > 0}
-                  <span class="cost-badge"><IconCoin size={11} /> {fmtCost(selectedResult.estimatedCost)}</span>
+                {#if selectedResult.actualCost != null && selectedResult.actualCost > 0}
+                  <span class="cost-badge" title="Actual cost billed by OpenRouter"><IconCoin size={11} /> {fmtCost(selectedResult.actualCost)}</span>
+                {:else if selectedResult.estimatedCost != null && selectedResult.estimatedCost > 0}
+                  <span class="cost-badge" title="Estimated cost"><IconCoin size={11} /> {fmtCost(selectedResult.estimatedCost)}</span>
                 {/if}
-                {#if selectedResult.estimatedTokens}
-                  <span class="token-badge"><IconStack size={11} /> {selectedResult.estimatedTokens.toLocaleString()} tok</span>
+                {#if selectedResult.actualTokens}
+                  <span class="token-badge" title="Actual tokens"><IconStack size={11} /> {selectedResult.actualTokens.toLocaleString()} tok</span>
+                {:else if selectedResult.estimatedTokens}
+                  <span class="token-badge" title="Estimated tokens"><IconStack size={11} /> {selectedResult.estimatedTokens.toLocaleString()} tok</span>
                 {/if}
               </div>
             </div>
@@ -2702,7 +2932,11 @@
                         {#if r.p3 > 0}<span class="stat-pill p3">{r.p3} P3</span>{/if}
                       </span>
                     {/if}
-                    {#if r.estimatedCost != null && r.estimatedCost > 0}<span class="cost-badge"><IconCoin size={10} /> {fmtCost(r.estimatedCost)}</span>{/if}
+                    {#if r.actualCost != null && r.actualCost > 0}
+                      <span class="cost-badge" title="Actual cost billed by OpenRouter"><IconCoin size={10} /> {fmtCost(r.actualCost)}</span>
+                    {:else if r.estimatedCost != null && r.estimatedCost > 0}
+                      <span class="cost-badge" title="Estimated cost"><IconCoin size={10} /> {fmtCost(r.estimatedCost)}</span>
+                    {/if}
                     {#if r.status === "interrupted" && r.canResume}
                       <button class="btn btn-xs timeline-resume-btn" onclick={() => void resumeRunNow(r.id)} disabled={running} title="Resume — reuses completed reviewer outputs, re-runs only the missing ones">
                         <IconPlayerPlay size={11} /> Resume
@@ -2845,9 +3079,10 @@
 
 <!-- Raw output modal — reviewer texts + judge JSON, for debugging -->
 {#if rawResult}
-  {@const rawEntries = Object.entries(rawResult.rawOutputs ?? {})}
+  {@const rawOutputs = buildRawOutputs(rawResult)}
+  {@const selectedOutput = rawOutputs.find((o) => o.key === rawSelectedKey) ?? rawOutputs[0] ?? null}
   <div class="modal-backdrop" transition:fade={{ duration: 200 }} onclick={() => (rawResult = null)} onkeydown={(e) => { if (e.key === "Escape") rawResult = null; }} role="presentation">
-    <div class="modal modal-wide" transition:fly={{ y: 30, duration: 400, easing: cubicInOut }} onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
+    <div class="modal modal-raw" transition:fly={{ y: 30, duration: 400, easing: cubicInOut }} onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
       <header class="modal-header">
         <span class="modal-title">
           Raw Output — {rawResult.configName}
@@ -2863,44 +3098,117 @@
           </div>
         {/if}
 
-        {#each rawEntries as [model, text] (model)}
-          <details class="raw-section" open>
+        <!-- Top: Generation Audit — sortable table with timestamp -->
+        {#if rawResult.generationMetadata && Object.keys(rawResult.generationMetadata).length > 0}
+          {@const genMeta = rawResult.generationMetadata}
+          {@const genEntries = sortGenEntries(Object.entries(genMeta), genSortKey, genSortDir)}
+          <details class="raw-section" open={genAuditOpen} ontoggle={(e) => { if (e.currentTarget.open && !genAuditOpen) { genAuditOpen = true; rawOutputOpen = false; } else if (!e.currentTarget.open && genAuditOpen) { genAuditOpen = false; } }}>
             <summary>
               <IconChevronRight size={12} />
-              <span class="raw-section-title">{rawResult.source === "upload" ? "Pasted analysis" : "Reviewer"} · {modelLabel(model)}</span>
-              <span class="raw-section-id">{model}</span>
-              <span class="raw-section-len">{text.length.toLocaleString()} chars</span>
+              <span class="raw-section-title">Generation Audit · OpenRouter</span>
+              <span class="raw-section-len">{genEntries.length} generations</span>
             </summary>
-            {#if text}
-              <pre class="raw-pre">{text}</pre>
-            {:else}
-              <div class="raw-empty" style="color: var(--color-error);">No output — this reviewer returned an empty response. It may have hit a context limit, rate limit, or the model may not support the prompt format.</div>
-            {/if}
+            <div class="gen-audit-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th class="sortable" onclick={() => setGenSort("time")}>
+                      Time {#if genSortKey === "time"}<span class="sort-arrow">{genSortDir === "asc" ? "▲" : "▼"}</span>{/if}
+                    </th>
+                    <th class="sortable" onclick={() => setGenSort("role")}>
+                      Role {#if genSortKey === "role"}<span class="sort-arrow">{genSortDir === "asc" ? "▲" : "▼"}</span>{/if}
+                    </th>
+                    <th class="sortable" onclick={() => setGenSort("requested")}>
+                      Requested {#if genSortKey === "requested"}<span class="sort-arrow">{genSortDir === "asc" ? "▲" : "▼"}</span>{/if}
+                    </th>
+                    <th class="sortable" onclick={() => setGenSort("actual")}>
+                      Actual Model {#if genSortKey === "actual"}<span class="sort-arrow">{genSortDir === "asc" ? "▲" : "▼"}</span>{/if}
+                    </th>
+                    <th class="sortable" onclick={() => setGenSort("provider")}>
+                      Provider {#if genSortKey === "provider"}<span class="sort-arrow">{genSortDir === "asc" ? "▲" : "▼"}</span>{/if}
+                    </th>
+                    <th class="num sortable" onclick={() => setGenSort("inTok")}>
+                      In tok {#if genSortKey === "inTok"}<span class="sort-arrow">{genSortDir === "asc" ? "▲" : "▼"}</span>{/if}
+                    </th>
+                    <th class="num sortable" onclick={() => setGenSort("outTok")}>
+                      Out tok {#if genSortKey === "outTok"}<span class="sort-arrow">{genSortDir === "asc" ? "▲" : "▼"}</span>{/if}
+                    </th>
+                    <th class="num sortable" onclick={() => setGenSort("cost")}>
+                      Cost {#if genSortKey === "cost"}<span class="sort-arrow">{genSortDir === "asc" ? "▲" : "▼"}</span>{/if}
+                    </th>
+                    <th class="sortable" onclick={() => setGenSort("finish")}>
+                      Finish {#if genSortKey === "finish"}<span class="sort-arrow">{genSortDir === "asc" ? "▲" : "▼"}</span>{/if}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each genEntries as [key, meta] (key)}
+                    {@const parsed = parseGenerationKey(key, rawResult.aggregatorModel)}
+                    {@const mismatch = isRealFailover(parsed.requestedModel, meta.model)}
+                    <tr>
+                      <td class="mono">{fmtTime(meta.createdAt)}</td>
+                      <td>{parsed.role === "aggregator" ? "Judge" : "Reviewer"}</td>
+                      <td class="mono">{modelLabel(parsed.requestedModel)}</td>
+                      <td class="mono {mismatch ? 'mismatch' : ''}">{modelLabel(meta.model)}{#if mismatch} <span class="failover-badge">failover</span>{/if}</td>
+                      <td>{meta.providerName ?? "—"}</td>
+                      <td class="num">{meta.tokensPrompt.toLocaleString()}</td>
+                      <td class="num">{meta.tokensCompletion.toLocaleString()}</td>
+                      <td class="num {meta.totalCost > 0 ? 'paid' : 'free'}">{meta.totalCost > 0 ? `$${meta.totalCost.toFixed(5)}` : "free"}</td>
+                      <td>{meta.finishReason ?? "—"}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
           </details>
-        {/each}
-        {#if rawEntries.length === 0}
-          <div class="raw-empty">No reviewer output was captured for this run.</div>
         {/if}
 
-        <details class="raw-section" open>
-          <summary>
-            <IconChevronRight size={12} />
-            <span class="raw-section-title">Judge · {modelLabel(rawResult.aggregatorModel)}</span>
-            <span class="raw-section-id">{rawResult.aggregatorModel}</span>
-            {#if rawResult.aggregatorOutput}<span class="raw-section-len">{rawResult.aggregatorOutput.length.toLocaleString()} chars</span>{/if}
-          </summary>
-          {#if rawResult.aggregatorOutput}
-            <pre class="raw-pre">{rawResult.aggregatorOutput}</pre>
-          {:else}
-            <div class="raw-empty">Judge output was not captured for this run (older run, or the judge never responded).</div>
+        <!-- Bottom: reviewer/judge picker + raw output — one merged card -->
+        <div class="raw-output-card">
+          {#if rawOutputs.length > 0}
+            <div class="raw-output-picker">
+              <select class="task-filter-select raw-output-select" value={selectedOutput?.key ?? ""} onchange={(e) => (rawSelectedKey = e.currentTarget.value)}>
+                {#each rawOutputs as o (o.key)}
+                  <option value={o.key}>{o.label} · {o.text.length.toLocaleString()} chars</option>
+                {/each}
+              </select>
+            </div>
           {/if}
-        </details>
+          <details open={rawOutputOpen} ontoggle={(e) => { if (e.currentTarget.open && !rawOutputOpen) { rawOutputOpen = true; genAuditOpen = false; } else if (!e.currentTarget.open && rawOutputOpen) { rawOutputOpen = false; } }}>
+            <summary>
+              <IconChevronRight size={12} />
+              <span class="raw-section-title">Raw Output</span>
+              {#if selectedOutput}<span class="raw-section-len">{selectedOutput.text.length.toLocaleString()} chars</span>{/if}
+            </summary>
+            {#if rawOutputs.length > 0}
+              {#if selectedOutput}
+                {#if selectedOutput.text}
+                  <pre class="raw-pre">{selectedOutput.text}</pre>
+                {:else}
+                  <div class="raw-empty" style="color: var(--color-error);">No output — this reviewer returned an empty response. It may have hit a context limit, rate limit, or the model may not support the prompt format.</div>
+                {/if}
+              {/if}
+            {:else}
+              <div class="raw-empty">No reviewer or judge output was captured for this run.</div>
+            {/if}
+          </details>
+        </div>
       </div>
       <footer class="modal-footer">
-        <button class="btn btn-sm" onclick={dumpRawToMarkdown} disabled={!rawResult?.rawOutputs && !rawResult?.aggregatorOutput}>
-          <IconDownload size={13} /> Dump to MD
-        </button>
-        <button class="btn btn-sm" onclick={() => (rawResult = null)}>Close</button>
+        <div class="flex items-center gap-2">
+          <button class="btn btn-sm" onclick={refreshGenerationMetadata} disabled={genRefreshing || !rawResult?.generationIds} title="Fetch actual model, provider, tokens, and cost from OpenRouter">
+            <IconRefresh size={13} class={genRefreshing ? 'spin' : ''} /> {genRefreshing ? 'Fetching…' : 'Refresh from OpenRouter'}
+          </button>
+          <button class="btn btn-sm btn-primary" onclick={rerunJudgeForRawResult} disabled={running} title="Rerun only the judge / aggregator using the reviewer outputs from this run">
+            <IconPlayerPlay size={13} /> Rerun Judge
+          </button>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="btn btn-sm" onclick={dumpRawToMarkdown} disabled={!rawResult?.rawOutputs && !rawResult?.aggregatorOutput}>
+            <IconDownload size={13} /> Dump to MD
+          </button>
+          <button class="btn btn-sm" onclick={() => (rawResult = null)}>Close</button>
+        </div>
       </footer>
     </div>
   </div>
@@ -3080,6 +3388,16 @@
                 placeholder={`Search ${availableModels.length} models…`}
                 aria-label="Search reviewer models"
               />
+              {#if popularity.size > 0}
+                <div class="model-sort-toggle">
+                  <button class="model-sort-btn" class:selected={modelSort === "popular"} onclick={() => (modelSort = "popular")} title="Sort by OpenRouter popularity (7-day token usage)">
+                    Popular
+                  </button>
+                  <button class="model-sort-btn" class:selected={modelSort === "all"} onclick={() => (modelSort = "all")} title="Catalog order">
+                    All
+                  </button>
+                </div>
+              {/if}
               {#if modelSearch}
                 <span class="model-search-count">{filteredModels.length} match{filteredModels.length === 1 ? "" : "es"}</span>
               {/if}
@@ -3087,14 +3405,19 @@
             {#if filteredModels.length > 0}
               <div class="model-picker">
                 {#each filteredModels as m (m.id)}
+                  {@const pop = modelPopularity(m.id)}
                   <button
                     class="model-chip"
                     class:selected={editing.reviewerModels.includes(m.id)}
+                    class:popular={pop != null}
                     onclick={() => toggleReviewerModel(m.id)}
                     title={m.id}
                   >
                     {m.name}
                     {#if m.paramSize && m.paramSize !== "unknown"}<span class="model-param-badge">{m.paramSize}</span>{/if}
+                    {#if pop != null && pop > 0}
+                      <span class="model-pop-badge" title="{fmtPopularity(pop)} tokens used on OpenRouter in the last 7 days">{fmtPopularity(pop)}</span>
+                    {/if}
                   </button>
                 {/each}
               </div>
@@ -3108,7 +3431,7 @@
 
         <!-- Aggregator -->
         <label class="field">
-          <span class="field-label">Aggregator / Judge <small class="field-hint">— "openrouter/auto" = auto-route to best model</small></span>
+          <span class="field-label">Aggregator / Judge <small class="field-hint">— empty / "auto" = pick from same tier as reviewers (free→openrouter/free, paid→openrouter/auto)</small></span>
           <AggregatorModelPicker
             value={editing.aggregatorModel}
             {freeModels}
@@ -3620,6 +3943,17 @@
   .upload-reviewer-text:focus { outline: none; border-color: var(--color-accent); }
 
   /* Raw output modal */
+  .modal-raw {
+    width: 960px;
+    max-width: 96vw;
+    height: 90vh;
+    max-height: 90vh;
+  }
+  .modal-raw .modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
   .raw-modal-date {
     font-size: 0.6875rem;
     font-weight: 400;
@@ -3645,6 +3979,7 @@
     margin-bottom: 0.5rem;
     background: rgba(var(--surface-1-rgb), 0.3);
     overflow: hidden;
+    flex-shrink: 0;
   }
   .raw-section summary {
     display: flex;
@@ -3661,15 +3996,6 @@
   .raw-section summary :global(svg:first-child) { color: var(--color-muted); transition: transform 0.2s; flex-shrink: 0; }
   .raw-section[open] summary :global(svg:first-child) { transform: rotate(90deg); }
   .raw-section-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .raw-section-id {
-    font-size: 0.625rem;
-    color: var(--color-muted);
-    font-family: var(--font-mono, monospace);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-  }
   .raw-section-len {
     margin-left: auto;
     font-size: 0.625rem;
@@ -3680,24 +4006,118 @@
   }
   .raw-pre {
     margin: 0;
-    padding: 0.6rem;
+    padding: 0.75rem;
     font-family: var(--font-mono, monospace);
     font-size: 0.6875rem;
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
-    max-height: 320px;
-    overflow-y: auto;
     color: var(--color-text);
-    opacity: 0.85;
+    opacity: 0.9;
     border-top: 1px solid rgba(var(--border-rgb), 0.2);
-    background: rgba(var(--bg-deep-rgb), 0.3);
+    background: rgba(var(--bg-deep-rgb), 0.35);
   }
   .raw-empty {
     padding: 0.5rem 0.6rem;
     font-size: 0.6875rem;
     color: var(--color-muted);
     border-top: 1px solid rgba(var(--border-rgb), 0.2);
+  }
+
+  /* Generation audit table */
+  .gen-audit-table { overflow-x: auto; }
+  .gen-audit-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.6875rem;
+  }
+  .gen-audit-table th {
+    background: rgba(var(--bg-deep-rgb), 0.5);
+    border: 1px solid var(--color-border);
+    padding: 0.35rem 0.4rem;
+    text-align: left;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-size: 0.625rem;
+    color: var(--color-muted);
+    white-space: nowrap;
+  }
+  .gen-audit-table td {
+    border: 1px solid var(--color-border);
+    padding: 0.3rem 0.4rem;
+    white-space: nowrap;
+  }
+  .gen-audit-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .gen-audit-table td.mono { font-family: var(--font-mono, "JetBrains Mono", monospace); font-size: 0.625rem; }
+  .gen-audit-table td.mismatch { color: var(--color-warning); }
+  .gen-audit-table td.paid { color: var(--color-warning); font-weight: 700; }
+  .gen-audit-table td.free { color: var(--color-success); }
+  .gen-audit-table th.sortable {
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.15s, background 0.15s;
+  }
+  .gen-audit-table th.sortable:hover { color: var(--color-text); background: rgba(var(--accent-rgb), 0.1); }
+  .sort-arrow {
+    font-size: 0.5rem;
+    margin-left: 0.15rem;
+    color: var(--color-accent);
+  }
+
+  /* Merged Raw Output card: picker + collapsible in one bordered container. */
+  .raw-output-card {
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+    background: rgba(var(--surface-1-rgb), 0.3);
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .raw-output-picker {
+    padding: 0.4rem 0.5rem;
+    border-bottom: 1px solid var(--color-border);
+    background: rgba(var(--bg-deep-rgb), 0.3);
+    flex-shrink: 0;
+  }
+  .raw-output-picker select {
+    width: 100%;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M2 4 L5 7 L8 4' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.45rem center;
+    padding-right: 1.4rem;
+  }
+  .raw-output-picker select:focus { outline: 2px solid var(--color-accent); outline-offset: -1px; }
+  .raw-output-card > details { margin: 0; }
+  .raw-output-card > details > summary {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.45rem 0.6rem;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--color-text);
+    list-style: none;
+  }
+  .raw-output-card > details > summary::-webkit-details-marker { display: none; }
+  .raw-output-card > details > summary :global(svg:first-child) { color: var(--color-muted); transition: transform 0.2s; flex-shrink: 0; }
+  .raw-output-card > details[open] > summary :global(svg:first-child) { transform: rotate(90deg); }
+
+  .failover-badge {
+    display: inline-block;
+    padding: 0.05rem 0.3rem;
+    border-radius: 999px;
+    font-size: 0.5625rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: rgba(var(--warning-rgb), 0.15);
+    color: var(--color-warning);
+    margin-left: 0.25rem;
   }
 
   .monitor-view {
@@ -4778,6 +5198,55 @@
   .model-chip.selected .model-param-badge {
     background: rgba(var(--accent-rgb), 0.2);
     color: var(--color-accent);
+  }
+
+  /* Popularity badge — shows 7-day token usage from OpenRouter rankings */
+  .model-pop-badge {
+    display: inline-block;
+    margin-left: 0.35rem;
+    padding: 0.05rem 0.3rem;
+    border-radius: 4px;
+    background: rgba(var(--accent-3-rgb), 0.12);
+    font-size: 0.5625rem;
+    font-weight: 700;
+    color: var(--color-accent-cyan);
+    letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+  .model-chip.selected .model-pop-badge {
+    background: rgba(var(--accent-3-rgb), 0.25);
+  }
+  .model-chip.popular {
+    border-color: rgba(var(--accent-3-rgb), 0.25);
+  }
+
+  /* Popular / All sort toggle */
+  .model-sort-toggle {
+    display: flex;
+    gap: 0;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+  .model-sort-btn {
+    padding: 0.2rem 0.5rem;
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    background: rgba(var(--bg-deep-rgb), 0.4);
+    color: var(--color-muted);
+    border: none;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .model-sort-btn.selected {
+    background: rgba(var(--accent-rgb), 0.15);
+    color: var(--color-accent);
+  }
+  .model-sort-btn:not(.selected):hover {
+    color: var(--color-text);
   }
 
   /* Lenses */

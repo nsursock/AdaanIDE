@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ProviderMessage, ModelInfo } from "../../types.js";
 import type { LLMProvider } from "../agent/provider.js";
+import { OpenRouterProvider } from "../agent/providers/openrouter.js";
 import type { Workspace } from "../workspace.js";
 import type {
   ReviewConfig,
@@ -15,11 +16,40 @@ import type {
 import { reviewId, reviewStore } from "./store.js";
 import { parsePriorityTable, parseAggregatorJSON, buildIssueBody, buildLabels, backfillTaskFields, lensCode } from "./parse.js";
 import { mergeTaskList, buildTasksMarkdown } from "./tasklist.js";
-import { resolveReviewerModels, resolveAggregatorModel, estimateReviewCost, findModel, fetchModelsByTier } from "./models.js";
+import { resolveReviewerModels, resolveAggregatorModel, isAutoAggregator, pickAutoAggregator, estimateReviewCost, findModel, fetchModelsByTier, fetchAllGenerationMetadata } from "./models.js";
 
 const execAsync = promisify(exec);
 
 function estTokens(s: string): number { return Math.ceil(s.length / 4); }
+
+/** After a run completes, fetch actual generation metadata from the
+ *  OpenRouter Generation API for every captured generation ID. This
+ *  reveals what model/provider OpenRouter actually routed to (failover,
+ *  auto-router decisions) vs what was requested. Silently skips when the
+ *  provider is a custom/local endpoint (no OpenRouter API to query) or
+ *  when there are no generation IDs. */
+async function enrichWithGenerationMetadata(result: ReviewResult, provider: LLMProvider): Promise<void> {
+  if (!result.generationIds || Object.keys(result.generationIds).length === 0) return;
+  // Only query the OpenRouter Generation API when using the real OpenRouter
+  // endpoint — local/custom servers don't have this API.
+  if (!(provider instanceof OpenRouterProvider) || provider.hasCustomBaseUrl()) return;
+  const apiKey = provider.getApiKey();
+  if (!apiKey || apiKey === "not-needed") return;
+  try {
+    const meta = await fetchAllGenerationMetadata(apiKey, result.generationIds, provider.getBaseUrl());
+    if (Object.keys(meta).length > 0) {
+      result.generationMetadata = meta;
+      let totalCost = 0;
+      let totalTokens = 0;
+      for (const m of Object.values(meta)) {
+        totalCost += m.totalCost || 0;
+        totalTokens += (m.tokensPrompt || 0) + (m.tokensCompletion || 0);
+      }
+      result.actualCost = Math.round(totalCost * 10000) / 10000;
+      result.actualTokens = totalTokens;
+    }
+  } catch { /* best-effort — don't fail the run over metadata fetch */ }
+}
 
 /** Default per-request deadline for review LLM calls. Review prompts are
  *  large (10k+ tokens of project context + committee instructions) and
@@ -371,14 +401,19 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     // 2. Resolve models + estimate cost.
     const reviewerCount = config.reviewerModels.length || 1;
     const { ids: reviewerIds, models: reviewerModelInfos } = await resolveReviewerModels(config, provider, reviewerCount);
-    const aggregatorModel = resolveAggregatorModel(config, reviewerIds);
+    let aggregatorModel = resolveAggregatorModel(config, reviewerIds);
+
+    // Fetch all models to find the aggregator's pricing and resolve the auto
+    // aggregator to a concrete model from the same tier as the reviewers.
+    // Try exact match first, then prefix match (catalog slugs often have date suffixes).
+    const { free, paid } = await fetchModelsByTier(provider);
+    const allModels = [...free, ...paid];
+    if (isAutoAggregator(aggregatorModel)) {
+      aggregatorModel = pickAutoAggregator(reviewerIds, free, paid);
+    }
     result.reviewerModels = reviewerIds;
     result.aggregatorModel = aggregatorModel;
 
-    // Fetch all models to find the aggregator's pricing. Try exact match
-    // first, then prefix match (catalog slugs often have date suffixes).
-    const { free, paid } = await fetchModelsByTier(provider);
-    const allModels = [...free, ...paid];
     const aggModelInfo = findModel(allModels, aggregatorModel)
       ?? allModels.find((m) => m.id.startsWith(aggregatorModel + "-") || m.id.startsWith(aggregatorModel));
 
@@ -442,15 +477,22 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
       .map((model, index) => ({ model, index }))
       .filter(({ model }) => pendingModels.includes(model))
       .map(async ({ model, index }) => {
+        let text = "";
+        let started = false;
+        const reviewerKey = `reviewer:${model}`;
         try {
-          let text = "";
-          let started = false;
-          for await (const ev of provider.chat(committeeMessages, { model, temperature: 0.3, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
+          for await (const ev of provider.chat(committeeMessages, { model, temperature: 0.3, maxTokens: 8192, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
             if (ev.type === "text.delta") {
               const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
               text += chunk;
               started = true;
               pushDelta(model, index, chunk);
+            } else if (ev.type === "provider.started") {
+              const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
+              if (genId) {
+                result.generationIds ??= {};
+                result.generationIds[reviewerKey] = genId;
+              }
             } else if (ev.type === "provider.queued") {
               // OpenRouter sends PROCESSING keep-alives throughout the stream,
               // not just before the first token. Only surface the queued state
@@ -460,7 +502,7 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
               const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
               if (genId) {
                 result.generationIds ??= {};
-                result.generationIds[model] = genId;
+                result.generationIds[reviewerKey] = genId;
               }
             } else if (ev.type === "error") {
               throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Provider error");
@@ -473,7 +515,15 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
           return { model, raw: text, index, error: null as string | null };
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
+          // If the model produced partial text before erroring/timing out,
+          // preserve that text so findings are not lost.
+          if (text.trim().length > 200) {
+            result.rawOutputs[model] = text + `\n\n[NOTE: Reviewer stopped early: ${msg}]`;
+            await persist();
+            return { model, raw: result.rawOutputs[model], index, error: msg };
+          }
           result.rawOutputs[model] = `[REVIEWER ERROR: ${msg}]`;
+          await persist();
           return { model, raw: "", index, error: msg };
         }
       });
@@ -546,7 +596,8 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     let aggRaw = "";
     let aggReasoning = "";
     let aggStarted = false;
-    for await (const ev of provider.chat(aggMessages, { model: aggregatorModel, temperature: 0.3, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
+    const aggKey = `aggregator:${aggregatorModel}`;
+    for await (const ev of provider.chat(aggMessages, { model: aggregatorModel, temperature: 0.3, maxTokens: 8192, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
       if (ev.type === "text.delta") {
         const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
         aggRaw += chunk;
@@ -557,6 +608,12 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
         aggReasoning += chunk;
         aggStarted = true;
         yield { phase: "aggregator.reasoning", text: chunk };
+      } else if (ev.type === "provider.started") {
+        const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
+        if (genId) {
+          result.generationIds ??= {};
+          result.generationIds[aggKey] = genId;
+        }
       } else if (ev.type === "provider.queued") {
         // Suppress keep-alive queue events after output has started —
         // OpenRouter intersperses them between reasoning/text chunks.
@@ -565,7 +622,7 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
         const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
         if (genId) {
           result.generationIds ??= {};
-          result.generationIds[aggregatorModel] = genId;
+          result.generationIds[aggKey] = genId;
         }
       } else if (ev.type === "error") {
         throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Aggregator error");
@@ -573,6 +630,7 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     }
 
     result.aggregatorOutput = aggRaw;
+    if (aggReasoning) result.aggregatorReasoning = aggReasoning;
     const parsed = parseAggregatorJSON(aggRaw);
     let tasks = parsed.tasks;
 
@@ -634,6 +692,10 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     result.status = "complete";
     result.completedAt = new Date().toISOString();
 
+    // Fetch actual generation metadata from OpenRouter — reveals failover
+    // (requested gemma → got cohere) and auto-router decisions (auto → GPT-5.6).
+    await enrichWithGenerationMetadata(result, provider);
+
     await opts.onResultUpdate?.(result);
     yield { phase: "complete", result };
   } catch (e) {
@@ -680,12 +742,16 @@ export async function* runAggregateOnly(opts: AggregateOnlyOptions): AsyncIterab
   const { config, workspace, provider, reviewerOutputs } = opts;
   let aggregatorModel = opts.aggregatorModel || resolveAggregatorModel(config, Object.keys(reviewerOutputs));
 
-  // In upload mode, the "reviewer ids" are pasted names (not real model ids).
-  // If the resolved aggregator is "auto" or a pasted name, pick a real model
-  // from the provider's catalog. "openrouter/auto" is a valid OpenRouter model
-  // id that auto-routes to the best available model.
-  if (aggregatorModel === "auto" || !aggregatorModel) {
-    aggregatorModel = "openrouter/auto";
+  // In upload mode, the "reviewer ids" are pasted names (not real model ids),
+  // so pickAutoAggregator can't classify them by tier. Use the config's
+  // modelTier instead: free tier → openrouter/free (best free model);
+  // otherwise openrouter/auto (best paid model).
+  if (isAutoAggregator(aggregatorModel)) {
+    if (config.modelTier === "free") {
+      aggregatorModel = "openrouter/free";
+    } else {
+      aggregatorModel = "openrouter/auto";
+    }
   }
 
   const result: ReviewResult = {
@@ -736,7 +802,8 @@ export async function* runAggregateOnly(opts: AggregateOnlyOptions): AsyncIterab
     let aggRaw = "";
     let aggReasoning = "";
     let aggStarted = false;
-    for await (const ev of provider.chat(aggMessages, { model: aggregatorModel, temperature: 0.3, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
+    const aggKey = `aggregator:${aggregatorModel}`;
+    for await (const ev of provider.chat(aggMessages, { model: aggregatorModel, temperature: 0.3, maxTokens: 8192, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
       if (ev.type === "text.delta") {
         const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
         aggRaw += chunk;
@@ -747,6 +814,12 @@ export async function* runAggregateOnly(opts: AggregateOnlyOptions): AsyncIterab
         aggReasoning += chunk;
         aggStarted = true;
         yield { phase: "aggregator.reasoning", text: chunk };
+      } else if (ev.type === "provider.started") {
+        const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
+        if (genId) {
+          result.generationIds ??= {};
+          result.generationIds[aggKey] = genId;
+        }
       } else if (ev.type === "provider.queued") {
         // Suppress keep-alive queue events after output has started —
         // OpenRouter intersperses them between reasoning/text chunks.
@@ -755,7 +828,7 @@ export async function* runAggregateOnly(opts: AggregateOnlyOptions): AsyncIterab
         const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
         if (genId) {
           result.generationIds ??= {};
-          result.generationIds[aggregatorModel] = genId;
+          result.generationIds[aggKey] = genId;
         }
       } else if (ev.type === "error") {
         throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Aggregator error");
@@ -763,6 +836,7 @@ export async function* runAggregateOnly(opts: AggregateOnlyOptions): AsyncIterab
     }
 
     result.aggregatorOutput = aggRaw;
+    if (aggReasoning) result.aggregatorReasoning = aggReasoning;
     const parsed = parseAggregatorJSON(aggRaw);
     let tasks = parsed.tasks;
     if (tasks.length === 0 && fallbackTasks.length > 0) {
@@ -816,6 +890,10 @@ export async function* runAggregateOnly(opts: AggregateOnlyOptions): AsyncIterab
     result.tasks = tasks;
     result.status = "complete";
     result.completedAt = new Date().toISOString();
+
+    // Fetch actual generation metadata from OpenRouter (same as full review).
+    await enrichWithGenerationMetadata(result, provider);
+
     await persist();
     yield { phase: "complete", result };
   } catch (e) {

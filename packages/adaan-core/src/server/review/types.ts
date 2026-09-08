@@ -142,13 +142,22 @@ export interface ReviewResult {
   /** Raw text output from the aggregator/judge model (its JSON response).
    *  Kept for debugging the task-list generation. */
   aggregatorOutput?: string;
+  /** Reasoning text streamed from the aggregator/judge model (when the
+   *  model exposes a reasoning channel, e.g. GLM/o-series). Kept so the
+   *  raw-output modal can show the judge's thinking rather than just the
+   *  final JSON task list. */
+  aggregatorReasoning?: string;
   /** How this run was produced: a full committee review or an uploaded
    *  (pasted) analysis judged after the fact. */
   source?: "review" | "upload";
   /** Estimated cost in USD (for paid models). */
   estimatedCost?: number;
+  /** Actual total cost in USD summed from OpenRouter generation metadata. */
+  actualCost?: number;
   /** Estimated total tokens consumed. */
   estimatedTokens?: number;
+  /** Actual total tokens consumed summed from OpenRouter generation metadata. */
+  actualTokens?: number;
   /** `interrupted` = the server process stopped (quit/restart) while this run
    *  was in progress. Completed reviewer outputs are preserved in rawOutputs
    *  so the run can be resumed instead of re-run from scratch. */
@@ -162,6 +171,49 @@ export interface ReviewResult {
    *  to retrieve per-generation metadata (provider, latency, TTFT, tokens,
    *  cost, routing). Includes both reviewer and aggregator generations. */
   generationIds?: Record<string, string>;
+  /** Actual generation metadata fetched from the OpenRouter Generation API
+   *  after the run completes, keyed by the requested model id. Shows what
+   *  model/provider OpenRouter actually routed to — critical for
+   *  understanding failover (e.g. requested gemma → got cohere via 429
+   *  failover) and auto-router decisions (e.g. openrouter/auto → GPT-5.6). */
+  generationMetadata?: Record<string, GenerationMetadata>;
+}
+
+/** Metadata for a single OpenRouter generation, fetched from
+ *  GET /api/v1/generation?id=<genId>. Captures what actually happened —
+ *  the real model, provider, cost, tokens, and routing — vs what was
+ *  requested. */
+export interface GenerationMetadata {
+  /** The generation id (e.g. "gen-..."). */
+  id: string;
+  /** The model slug OpenRouter actually routed to (may differ from the
+   *  requested model on failover or when using openrouter/auto). */
+  model: string;
+  /** The upstream provider that served the request (e.g. "Cohere",
+   *  "Google AI Studio", "OpenAI"). */
+  providerName?: string;
+  /** The router used (e.g. "openrouter/auto" or the model slug itself). */
+  router?: string;
+  /** Total cost in USD for this generation. 0 for free models. */
+  totalCost: number;
+  /** Prompt (input) tokens. */
+  tokensPrompt: number;
+  /** Completion (output) tokens. */
+  tokensCompletion: number;
+  /** Reasoning tokens (if the model exposes a reasoning channel). */
+  tokensReasoning?: number;
+  /** Cached tokens (if prompt caching was applied). */
+  tokensCached?: number;
+  /** Latency in ms (total request time). */
+  latency?: number;
+  /** Time to first token in ms. */
+  timeToFirstToken?: number;
+  /** Finish reason ("stop", "length", "error", etc.). */
+  finishReason?: string;
+  /** Whether this generation used BYOK (bring-your-own-key). */
+  isByok?: boolean;
+  /** When the generation was created (ISO string). */
+  createdAt?: string;
 }
 
 /** SSE progress event yielded by the runner. */

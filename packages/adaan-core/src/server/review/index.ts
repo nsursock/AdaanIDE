@@ -9,6 +9,7 @@ export type {
   ExpertiseLevel,
   ModelTier,
   LivingTaskList,
+  GenerationMetadata,
 } from "./types.js";
 export {
   TASK_PRIORITIES,
@@ -68,6 +69,11 @@ export {
   poolForTier,
   resolveReviewerModels,
   resolveAggregatorModel,
+  isAutoAggregator,
+  pickAutoAggregator,
   estimateReviewCost,
   findModel,
+  fetchGenerationMetadata,
+  fetchAllGenerationMetadata,
+  fetchModelPopularity,
 } from "./models.js";

@@ -127,6 +127,17 @@ export class OpenRouterProvider implements LLMProvider {
     return this.baseUrl !== OPENROUTER_BASE;
   }
 
+  /** The API key used for OpenRouter requests (exposed for the Generation
+   *  API client — fetching post-hoc generation metadata needs the same key). */
+  getApiKey(): string {
+    return this.apiKey;
+  }
+
+  /** The base URL for OpenRouter requests. */
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
   /** Get the base URL for a given model — local endpoint for local models,
    *  OpenRouter for everything else. */
   private baseUrlForModel(model: string): string {
@@ -245,7 +256,15 @@ export class OpenRouterProvider implements LLMProvider {
         // immediately jumping to a different model family. 402/404 are not
         // transient (credits/availability won't change in 1.5s), so those go
         // straight to failover.
-        const transient = statusCode === 429 || statusCode === 503;
+        //
+        // Deadline-exceeded errors are NOT treated as transient here: they
+        // mean the model itself is just slow/verbose, not overloaded.
+        // Retrying the exact same model with the exact same prompt would
+        // likely time out again — wasting another full deadline window and
+        // potentially double the upstream cost (the provider may still bill
+        // for tokens generated before we gave up). Go straight to failover
+        // (a different model) or straight to the final error instead.
+        const transient = (statusCode === 429 || statusCode === 503) && !e.deadlineExceeded;
         if (transient && !retried.has(currentModel)) {
           retried.add(currentModel);
           // Surface the same-model retry so the engine can count it in
@@ -430,11 +449,18 @@ export class OpenRouterProvider implements LLMProvider {
       if (hardDeadlineHit) {
         const err = new Error(`Model ${options.model} exceeded hard deadline (${deadline}ms) — failing over`);
         (err as any).statusCode = 503;
+        // Distinguish from a genuine upstream 429/503 — this is OUR client
+        // giving up on a slow-but-otherwise-healthy request. Retrying the
+        // SAME model would just burn the same amount of time (and money,
+        // since the provider may bill for tokens already generated) again.
+        // Failover to a different model instead of a same-model retry.
+        (err as any).deadlineExceeded = true;
         throw err;
       }
       if (timedOut) {
         const err = new Error(`Request to ${options.model} timed out waiting for a response (>${this.idleTimeoutMs}ms)`);
         (err as any).statusCode = 503;
+        (err as any).deadlineExceeded = true;
         throw err;
       }
       throw e;
@@ -491,6 +517,9 @@ export class OpenRouterProvider implements LLMProvider {
           reasoningTokens: json.usage.completion_tokens_details?.reasoning_tokens ?? json.usage.reasoning_tokens ?? 0,
           cost: typeof json.usage.cost === "number" ? json.usage.cost : 0,
         } : undefined;
+        if (json.id && typeof json.id === "string" && json.id.startsWith("gen-")) {
+          yield { type: "provider.started", data: { generationId: json.id, model: options.model } };
+        }
         yield { type: "finish", data: { finishReason: mapFinishReason(choice?.finish_reason ?? "stop"), model: options.model, usage, generationId: json.id } };
       } catch (e) {
         throw new Error(`Failed to parse non-streaming response from ${options.model}: ${e instanceof Error ? e.message : String(e)}`);
@@ -539,11 +568,13 @@ export class OpenRouterProvider implements LLMProvider {
           if (hardDeadlineHit) {
             const err = new Error(`Model ${options.model} exceeded hard deadline (${deadline}ms) — failing over`);
             (err as any).statusCode = 503;
+            (err as any).deadlineExceeded = true;
             throw err;
           }
           if (timedOut) {
             const err = new Error(`Model ${options.model} stopped streaming (idle >${this.idleTimeoutMs}ms) — failing over`);
             (err as any).statusCode = 503;
+            (err as any).deadlineExceeded = true;
             throw err;
           }
           throw e;
@@ -605,6 +636,10 @@ export class OpenRouterProvider implements LLMProvider {
             // first data event.
             if (!generationId && typeof chunk.id === "string" && chunk.id.startsWith("gen-")) {
               generationId = chunk.id;
+              yield {
+                type: "provider.started",
+                data: { generationId: chunk.id, model: options.model },
+              };
             }
             const choice = chunk.choices?.[0];
             if (!choice) {

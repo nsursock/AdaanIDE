@@ -136,6 +136,24 @@ export const REVIEW_PRESETS: ReviewPreset[] = [
       lens("testing", "🧪", "Testing / QA Engineer", "game testing and QA engineer"),
     ],
   },
+  // --- Signal processing (audio, images, video) -----------------------------
+  {
+    id: "signal-processing",
+    name: "Signal Processing",
+    description: "10 specialists for DSP, audio, image, and video processing projects.",
+    lenses: [
+      lens("dsp", "🌊", "DSP Engineer", "digital signal processing engineer with deep expertise in filter design, transforms (FFT/DCT/wavelet), sampling theory, and real-time signal pipelines"),
+      lens("audio", "🔊", "Audio Engineer", "audio processing engineer specializing in codecs, acoustic analysis, noise suppression, echo cancellation, speech enhancement, and psychoacoustics"),
+      lens("image", "🖼️", "Image Processing Engineer", "image processing engineer with expertise in color science, demosaicing, denoising, super-resolution, feature extraction, and computational photography"),
+      lens("video", "🎬", "Video Processing Engineer", "video processing engineer specializing in motion estimation, frame-rate conversion, HDR, video codecs (H.264/H.265/AV1), and real-time streaming pipelines"),
+      lens("numerics", "📐", "Numerical Methods Specialist", "numerical methods specialist for fixed-point and floating-point arithmetic, SIMD vectorization, numerical stability, and quantization error analysis"),
+      lens("realtime", "⚡", "Real-Time Systems Engineer", "real-time embedded systems engineer with expertise in latency budgets, buffer management, DMA, interrupt handling, and hard real-time constraints on DSP hardware"),
+      lens("ml", "🧠", "ML for Signals Specialist", "ML researcher applying neural networks to signal processing — speech recognition, computer vision, learned codecs, and neural enhancement models"),
+      lens("hardware", "🔧", "Hardware/FPGA Engineer", "hardware engineer with expertise in FPGA/ASIC DSP implementations, HDL (Verilog/VHDL), hardware-software co-design, and DSP IP cores"),
+      lens("testing", "🧪", "Testing / QA Engineer", "testing and QA engineer for signal processing — golden-vector verification, perceptual metrics (PESQ/SSIM/PSNR), regression suites, and codec conformance testing"),
+      lens("architecture", "🏛️", "Pipeline Architect", "software architect for multi-stage signal processing pipelines — data flow, memory bandwidth, parallelism, and modular filter graph design"),
+    ],
+  },
 ];
 
 export function getPreset(id: string): ReviewPreset | undefined {

@@ -148,6 +148,8 @@ export async function GET({ url }) {
       p3: tasks.filter((t: any) => t.priority === "P3").length,
       estimatedCost: r.estimatedCost,
       estimatedTokens: r.estimatedTokens,
+      actualCost: r.actualCost,
+      actualTokens: r.actualTokens,
       /** Interrupted runs with surviving reviewer outputs can be resumed. */
       canResume:
         r.status === "interrupted" &&

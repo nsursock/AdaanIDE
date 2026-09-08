@@ -115,8 +115,13 @@ export {
   poolForTier,
   resolveReviewerModels,
   resolveAggregatorModel,
+  isAutoAggregator,
+  pickAutoAggregator,
   estimateReviewCost,
   findModel,
+  fetchGenerationMetadata,
+  fetchAllGenerationMetadata,
+  fetchModelPopularity,
   fingerprintTask,
   mergeTaskList,
   buildTasksMarkdown,
@@ -137,6 +142,7 @@ export type {
   SchedulerDeps,
   LivingTaskList,
   MergeStats,
+  GenerationMetadata,
 } from "./review/index.js";
 export {
   discoverProviders,
