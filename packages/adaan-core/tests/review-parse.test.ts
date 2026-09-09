@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import {
   parsePriorityTable,
   parseAggregatorJSON,
+  parseAggregatorResponse,
+  consolidateReviewerTasks,
+  tasksLikelyDuplicate,
   buildIssueBody,
   buildLabels,
   backfillTaskFields,
@@ -232,3 +235,87 @@ test("lensShortCode: derives codes by word count", async () => {
   assert.equal(lensCode({ label: "Statistician", code: "st" }), "ST");
   assert.equal(lensCode({ label: "Evaluation & Metrics Specialist", code: " eval " }), "EVAL");
 });
+
+test("parseAggregatorResponse: accepts JSON from the reasoning channel", () => {
+  const json = '{"tasks":[{"priority":"P0","issue":"Leak","mainFinding":"m","fix":"f","lenses":["DASC"],"reviewers":["Gemini"],"impact":"i"}]}';
+  const out = parseAggregatorResponse("", `thinking...\n${json}\n`);
+  assert.equal(out.parsed, true);
+  assert.equal(out.tasks.length, 1);
+  assert.equal(out.tasks[0].issue, "Leak");
+});
+
+test("parseAggregatorResponse: prefers content over reasoning", () => {
+  const content = '{"tasks":[{"priority":"P1","issue":"From content","mainFinding":"m","fix":"f","lenses":[],"reviewers":[],"impact":""}]}';
+  const reasoning = '{"tasks":[{"priority":"P0","issue":"From reasoning","mainFinding":"m","fix":"f","lenses":[],"reviewers":[],"impact":""}]}';
+  const out = parseAggregatorResponse(content, reasoning);
+  assert.equal(out.tasks[0].issue, "From content");
+});
+
+test("tasksLikelyDuplicate: merges differently-worded volatility findings", () => {
+  const a = mkTask({
+    issue: "Volatility channel look-ahead contamination",
+    mainFinding: "mx.roll wraps the last close into t=0",
+  });
+  const b = mkTask({
+    issue: "Volatility lookahead leakage",
+    mainFinding: "circular roll leaks terminal candle into first observation",
+  });
+  assert.equal(tasksLikelyDuplicate(a, b), true);
+});
+
+test("tasksLikelyDuplicate: keeps distinct root causes separate", () => {
+  const a = mkTask({ issue: "Volatility lookahead leakage", mainFinding: "roll wrap" });
+  const b = mkTask({ issue: "OHLC invariant not enforced", mainFinding: "close outside high/low" });
+  assert.equal(tasksLikelyDuplicate(a, b), false);
+});
+
+test("consolidateReviewerTasks: dedupes near-duplicate rows and takes highest priority", () => {
+  const rows: ReviewTask[] = [
+    mkTask({
+      priority: "P2",
+      issue: "Volatility channel look-ahead contamination",
+      mainFinding: "first volatility row uses terminal close via mx.roll",
+      reviewers: ["GPT"],
+      lenses: ["DASC"],
+    }),
+    mkTask({
+      priority: "P0",
+      issue: "Volatility lookahead leakage",
+      mainFinding: "circular roll leaks future price into t=0",
+      reviewers: ["Gemini"],
+      lenses: ["DASC", "STAT"],
+    }),
+    mkTask({
+      priority: "P1",
+      issue: "OHLC invariant not enforced",
+      mainFinding: "close can exceed high",
+      reviewers: ["Claude"],
+      lenses: ["STAT"],
+    }),
+    mkTask({
+      priority: "P0",
+      issue: "Candlestick bounding invariant violation",
+      mainFinding: "highs/lows omit close when bounding",
+      reviewers: ["Gemini"],
+      lenses: ["STAT"],
+    }),
+  ];
+  const out = consolidateReviewerTasks(rows);
+  assert.equal(out.length, 2, "two root causes after consolidate");
+  assert.equal(out[0].priority, "P0");
+  assert.ok(
+    /volatility|lookahead|look-ahead/i.test(out[0].issue + out[0].mainFinding) ||
+      /ohlc|candlestick|invariant/i.test(out[0].issue),
+  );
+  const vol = out.find((t) => /volatil|lookahead|look.?ahead/i.test(t.issue + t.mainFinding));
+  const ohlc = out.find((t) => /ohlc|candlestick|invariant/i.test(t.issue + t.mainFinding));
+  assert.ok(vol, "volatility cluster present");
+  assert.ok(ohlc, "ohlc cluster present");
+  assert.equal(vol!.priority, "P0", "volatility cluster keeps highest priority");
+  assert.ok(vol!.reviewers.includes("GPT") && vol!.reviewers.includes("Gemini"));
+  assert.equal(PRIO_ORDER_SAFE(out[0].priority) <= PRIO_ORDER_SAFE(out[1].priority), true);
+});
+
+function PRIO_ORDER_SAFE(p: ReviewTask["priority"]): number {
+  return { P0: 0, P1: 1, P2: 2, P3: 3 }[p];
+}

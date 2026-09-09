@@ -444,6 +444,9 @@
       );
     } else {
       lines.push("Judge JSON output was not captured for this run.", "");
+      if (r.taskListSource === "fallback") {
+        lines.push("_Task list was built from consolidated reviewer priority tables (judge fallback)._", "");
+      }
     }
 
     const md = lines.join("\n");

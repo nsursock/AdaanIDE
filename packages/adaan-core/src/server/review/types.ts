@@ -197,6 +197,10 @@ export interface ReviewResult {
    *  pool. Useful for explaining why `aggregatorModel` differs from the
    *  config's selected model. */
   aggregatorFailovers?: { from: string; to: string; reason: string }[];
+  /** Where the final task list came from. `aggregator` = judge emitted
+   *  parseable JSON; `fallback` = deterministic consolidate of reviewer
+   *  priority tables after the judge failed. */
+  taskListSource?: "aggregator" | "fallback";
 }
 
 /** Metadata for a single OpenRouter generation, fetched from

@@ -35,6 +35,9 @@ export {
 export {
   parsePriorityTable,
   parseAggregatorJSON,
+  parseAggregatorResponse,
+  consolidateReviewerTasks,
+  tasksLikelyDuplicate,
   buildIssueBody,
   buildLabels,
   backfillTaskFields,

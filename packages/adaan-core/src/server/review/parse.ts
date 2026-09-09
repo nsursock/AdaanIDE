@@ -98,6 +98,149 @@ export function parseAggregatorJSON(text: string): AggregatorOutput {
   return { tasks, parsed: true };
 }
 
+/** Parse judge output from content and/or reasoning. Reasoning-channel models
+ *  often dump the JSON (or a fenced block) into reasoning and leave content
+ *  empty — treating that as failure burned retries in production. */
+export function parseAggregatorResponse(content: string, reasoning = ""): AggregatorOutput {
+  const fromContent = parseAggregatorJSON(content);
+  if (fromContent.parsed) return fromContent;
+  if (reasoning.trim()) {
+    const fromReasoning = parseAggregatorJSON(reasoning);
+    if (fromReasoning.parsed) return fromReasoning;
+  }
+  if (content.trim() && reasoning.trim()) {
+    const fromBoth = parseAggregatorJSON(`${content}\n${reasoning}`);
+    if (fromBoth.parsed) return fromBoth;
+  }
+  return fromContent;
+}
+
+const PRIO_RANK: Record<TaskPriority, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
+
+const STOP_WORDS = new Set([
+  "the", "and", "for", "with", "from", "that", "this", "into", "over", "under",
+  "when", "than", "then", "also", "only", "just", "have", "has", "are", "was",
+  "were", "been", "being", "does", "did", "not", "but", "via", "per", "any",
+  "all", "can", "may", "its", "use", "used", "using",
+]);
+
+function taskTokens(text: string): Set<string> {
+  const raw = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+  const out = new Set(raw);
+  // "look ahead" ↔ "lookahead"
+  for (let i = 0; i < raw.length - 1; i++) {
+    if (raw[i].length <= 6 && raw[i + 1].length <= 6) out.add(raw[i] + raw[i + 1]);
+  }
+  return out;
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 1;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  const union = a.size + b.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
+
+function significantOverlap(a: Set<string>, b: Set<string>): number {
+  let n = 0;
+  for (const x of a) if (x.length >= 5 && b.has(x)) n++;
+  return n;
+}
+
+/** True when two findings likely share a root cause (same bug, different
+ *  wording across reviewers). Exact fingerprint match always merges; otherwise
+ *  require token overlap on title/finding text. */
+export function tasksLikelyDuplicate(a: ReviewTask, b: ReviewTask): boolean {
+  const fa = a.fingerprint ?? fingerprintIssue(a.issue);
+  const fb = b.fingerprint ?? fingerprintIssue(b.issue);
+  if (fa === fb) return true;
+  const fullA = taskTokens(`${a.issue} ${a.mainFinding}`);
+  const fullB = taskTokens(`${b.issue} ${b.mainFinding}`);
+  const jFull = jaccard(fullA, fullB);
+  if (jFull >= 0.28) return true;
+  if (significantOverlap(fullA, fullB) >= 2) return true;
+  const titleA = taskTokens(a.issue);
+  const titleB = taskTokens(b.issue);
+  if (significantOverlap(titleA, titleB) >= 1 && jaccard(titleA, titleB) >= 0.35) return true;
+  return false;
+}
+
+function fingerprintIssue(issue: string): string {
+  const words = issue
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort();
+  const s = words.join(" ");
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+function mergeTaskPair(primary: ReviewTask, other: ReviewTask): ReviewTask {
+  const out: ReviewTask = { ...primary };
+  if (PRIO_RANK[other.priority] < PRIO_RANK[out.priority]) out.priority = other.priority;
+  out.lenses = [...new Set([...out.lenses, ...other.lenses])];
+  out.reviewers = [...new Set([...out.reviewers, ...other.reviewers])];
+  if ((other.mainFinding?.length ?? 0) > (out.mainFinding?.length ?? 0)) out.mainFinding = other.mainFinding;
+  if ((other.fix?.length ?? 0) > (out.fix?.length ?? 0)) out.fix = other.fix;
+  if ((other.impact?.length ?? 0) > (out.impact?.length ?? 0)) out.impact = other.impact;
+  if ((other.issueBody?.length ?? 0) > (out.issueBody?.length ?? 0)) out.issueBody = other.issueBody;
+  if (other.type && (!out.type || out.type === "improvement")) out.type = other.type;
+  if (other.confidence === "high" || (!out.confidence && other.confidence)) out.confidence = other.confidence;
+  // Prefer the more specific issue title when priorities tie.
+  if (other.issue.length > out.issue.length + 8 && PRIO_RANK[other.priority] <= PRIO_RANK[primary.priority]) {
+    out.issue = other.issue;
+  }
+  return out;
+}
+
+/** Deterministic dedupe + priority sort of reviewer priority-table rows.
+ *  Used when the judge fails to emit JSON so the run still ends with a clean
+ *  priority list instead of a raw concat of near-duplicate rows. */
+export function consolidateReviewerTasks(tasks: ReviewTask[]): ReviewTask[] {
+  if (tasks.length <= 1) {
+    return tasks.map((t) => ({ ...t, fingerprint: t.fingerprint ?? fingerprintIssue(t.issue) }));
+  }
+  const clusters: ReviewTask[][] = [];
+  for (const raw of tasks) {
+    const t = { ...raw, fingerprint: raw.fingerprint ?? fingerprintIssue(raw.issue) };
+    let matched = -1;
+    for (let i = 0; i < clusters.length; i++) {
+      if (clusters[i].some((m) => tasksLikelyDuplicate(m, t))) {
+        matched = i;
+        break;
+      }
+    }
+    if (matched >= 0) clusters[matched].push(t);
+    else clusters.push([t]);
+  }
+
+  const merged = clusters.map((cluster) => {
+    // Seed with highest-priority member, then fold the rest in.
+    const ordered = [...cluster].sort((a, b) => {
+      const pd = PRIO_RANK[a.priority] - PRIO_RANK[b.priority];
+      if (pd !== 0) return pd;
+      return (b.mainFinding?.length ?? 0) - (a.mainFinding?.length ?? 0);
+    });
+    let acc = { ...ordered[0] };
+    for (const other of ordered.slice(1)) acc = mergeTaskPair(acc, other);
+    if (acc.reviewers.length >= 2) acc.confidence = acc.confidence ?? "high";
+    else acc.confidence = acc.confidence ?? "medium";
+    if (!acc.type) acc.type = acc.priority === "P0" || acc.priority === "P1" ? "bug" : "risk";
+    return acc;
+  });
+
+  merged.sort((a, b) => PRIO_RANK[a.priority] - PRIO_RANK[b.priority]);
+  return merged;
+}
+
 function extractFirstJSON(text: string): Record<string, unknown> | null {
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const candidate = fenceMatch ? fenceMatch[1] : text;

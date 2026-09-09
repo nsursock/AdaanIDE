@@ -14,7 +14,7 @@ import type {
   ExpertiseLevel,
 } from "./types.js";
 import { reviewId, reviewStore } from "./store.js";
-import { parsePriorityTable, parseAggregatorJSON, buildIssueBody, buildLabels, backfillTaskFields, lensCode } from "./parse.js";
+import { parsePriorityTable, parseAggregatorResponse, consolidateReviewerTasks, buildIssueBody, buildLabels, backfillTaskFields, lensCode } from "./parse.js";
 import { mergeTaskList, buildTasksMarkdown } from "./tasklist.js";
 import { resolveReviewerModels, resolveAggregatorModel, isAutoAggregator, pickAutoAggregator, estimateReviewCost, findModel, fetchModelsByTier, fetchAllGenerationMetadata, poolForTier } from "./models.js";
 
@@ -37,6 +37,28 @@ const TOKEN_BUDGETS = [8192, 16384, 32768];
  *  error). These are often transient/non-deterministic — retrying the same
  *  model is cheaper and more predictable than swapping to an unknown spare. */
 const MAX_SAME_MODEL_RETRIES = 1;
+
+/** System prompt for the judge — must match the FailoverProvider isAggregator
+ *  heuristic in tests (`ONLY a JSON object`). */
+const AGGREGATOR_SYSTEM =
+  "You are an adversarial adjudicator for a committee code review. You verify findings against evidence, reject unsupported claims, and resolve disagreements from the code rather than by reviewer vote. You return ONLY a JSON object, no prose, no markdown fences.";
+
+/** Follow-up when the judge burned tokens on analysis without emitting JSON. */
+const AGGREGATOR_JSON_NUDGE =
+  `STOP. Your previous response did not contain a parseable JSON object with a "tasks" array.\n\n` +
+  `Emit ONLY the JSON object now — no prose, no markdown fences, no analysis, no catalog. Shape:\n` +
+  `{"tasks":[{"priority":"P0","issue":"...","mainFinding":"...","fix":"...","lenses":["..."],"reviewers":["..."],"impact":"...","type":"bug","confidence":"high","issueBody":"## Summary\\n...","labels":["priority:p0"]}]}`;
+
+/** Compact re-aggregate from already-parsed tables when full-context judges fail. */
+function buildCompactAggregatorPrompt(fallbackTasks: ReviewTask[]): string {
+  return `Deduplicate and prioritize these committee findings into ONE JSON object. Merge rows that share the same root cause. Use the highest priority when reviewers disagree. Union lenses and reviewers. Order P0→P3.
+
+Return ONLY JSON (no prose, no fences):
+{"tasks":[{"priority":"P0","issue":"...","mainFinding":"...","fix":"...","lenses":["..."],"reviewers":["..."],"impact":"...","type":"bug","confidence":"high","issueBody":"## Summary\\n...\\n\\n## Current behavior\\n...\\n\\n## Expected behavior\\n...\\n\\n## Affected code\\n...\\n\\n## Acceptance criteria\\n- [ ] ...\\n\\n## References\\n- **Priority:** P0","labels":["priority:p0"]}]}
+
+Findings:
+${JSON.stringify(fallbackTasks)}`;
+}
 
 function estTokens(s: string): number { return Math.ceil(s.length / 4); }
 
@@ -276,7 +298,12 @@ export function buildAggregatorPrompt(
     return `${id} → ${clean.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`;
   }).join(", ");
 
-  return `You are an adversarial adjudicator for a committee code review — not a summarizer. Below ${reviewerIds.length > 1 ? `are the raw outputs from ${reviewerIds.length} reviewer models` : "is the raw committee output"}. Produce a single, deduplicated, prioritized task list as STRICT JSON — no prose, no markdown fences.
+  return `You are an adversarial adjudicator for a committee code review — not a summarizer. Below ${reviewerIds.length > 1 ? `are the raw outputs from ${reviewerIds.length} reviewer models` : "is the raw committee output"}. Produce a single, deduplicated, prioritized task list as STRICT JSON.
+
+CRITICAL OUTPUT CONTRACT:
+- Your ENTIRE response must be a single JSON object. No prose before or after. No markdown fences. No chain-of-thought in the content channel.
+- Do your adjudication silently; do NOT narrate steps, catalogs, or reconsiderations in the output.
+- If you have a reasoning channel, you may think there — but the content channel must still be ONLY the JSON object.
 
 Return exactly this shape:
 {
@@ -325,13 +352,7 @@ issueBody format (MANDATORY — every task must follow this exact structure):
 - **Reviewers:** <comma-separated reviewer names>
 - **Priority:** <P0|P1|P2|P3>
 
-EXECUTION ORDER (follow this sequence internally before producing output):
-1. Catalog all candidate findings across all reviewers and cluster duplicates by root cause.
-2. Map every L-code and model ID to its canonical short code and friendly name.
-3. Adjudicate each candidate (verify, classify, prioritize).
-4. Generate the final JSON payload.
-
-ADJUDICATION RULES:
+ADJUDICATION RULES (apply silently, then emit JSON):
 - Independently verify whether the supplied evidence actually supports each claim. Reject findings whose conclusions depend on assumptions not established by the project context.
 - Reject purely stylistic findings or findings with no concrete code evidence.
 - Two findings are duplicates when they identify the same underlying root cause, even if they describe different symptoms, use different terminology, or appear under different lenses. Merge them into ONE task.
@@ -568,18 +589,25 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
         let tokenBudgetIdx = 0;
         let sameModelRetries = 0;
         let spareFailovers = 0;
+        // Best partial output across all attempts — used as a last resort
+        // if every retry and spare fails. Partial findings are better than
+        // none, but we only accept them after exhausting all retries.
+        let partialOutput: { model: string; text: string } | null = null;
 
         // Retry strategy (in order of preference):
         // 1. Truncation (finish: length) → retry SAME model with a higher
         //    token budget. Truncation is a budget problem, not a model
         //    problem — a different model with the same budget will truncate
         //    too.
-        // 2. Transient failure (empty output, stream error) → retry SAME
-        //    model once with the same params. These are often non-deterministic.
+        // 2. Transient failure (empty output, stream error, partial output
+        //    before error) → retry SAME model once with the same params.
+        //    These are often non-deterministic infrastructure issues.
         // 3. Model-specific failure (tool-call syntax, degenerate reasoning)
         //    → swap to a SPARE model immediately. The model can't or won't
         //    do the task; retrying it won't help.
         // 4. Same-model retries exhausted → swap to a SPARE model.
+        // 5. All retries and spares exhausted → use partial output from an
+        //    earlier attempt if available (better than nothing).
         while (true) {
           let text = "";
           let reasoning = "";
@@ -662,15 +690,26 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
             }
           }
 
-          // Usable output → done. Partial text (>200 chars) before an error
-          // is preserved with a NOTE so findings are not lost (no failover).
+          // Save partial text from a stream error as a fallback — but DON'T
+          // accept it yet. Stream errors (JSON in SSE, fetch failed, timeout)
+          // are transient infrastructure issues, not model failures. Retry
+          // the same model first; only use the partial as a last resort if
+          // all retries and spares are exhausted.
           if (attemptError && text.trim().length > 200 && !isToolCallOutput(text)) {
-            successModel = currentModel;
-            successText = text + `\n\n[NOTE: Reviewer stopped early: ${attemptError}]`;
+            partialOutput = { model: currentModel, text: text + `\n\n[NOTE: Reviewer stopped early: ${attemptError}]` };
             lastError = attemptError;
-            break;
           }
-          if (!attemptError && text.trim().length > 0 && !isToolCallOutput(text)) {
+          // Truncated output (finish: length) with non-empty text — don't
+          // accept as success. Save as fallback and fall through to budget
+          // escalation. A different model with the same budget will truncate
+          // too, so retry the same model with a higher budget first.
+          const truncated = finishReason === "length";
+          if (!attemptError && truncated && text.trim().length > 0 && !isToolCallOutput(text)) {
+            partialOutput = { model: currentModel, text };
+            lastError = `Model output truncated (finish: length, ${text.length} chars) at maxTokens=${TOKEN_BUDGETS[tokenBudgetIdx]}`;
+          }
+          // Success (completed normally, not truncated) → accept, break.
+          if (!attemptError && !truncated && text.trim().length > 0 && !isToolCallOutput(text)) {
             successModel = currentModel;
             successText = text;
             lastError = null;
@@ -683,7 +722,6 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
 
           // No usable output this attempt — decide the retry strategy.
           lastError = lastError ?? attemptError ?? "No output — model returned empty response";
-          const truncated = finishReason === "length";
           const modelSpecific = isToolCallOutput(text) || (reasoning.trim().length > 200 && isDegenerate(reasoning));
 
           // Strategy 1: Truncation → raise token budget, retry same model.
@@ -722,6 +760,13 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
           currentModel = spare;
         }
 
+        // If all retries and spares failed but we have a partial output
+        // from an earlier attempt, use it as a last resort rather than
+        // recording an error — partial findings are better than none.
+        if (!successModel && partialOutput) {
+          successModel = partialOutput.model;
+          successText = partialOutput.text;
+        }
         // Persist the slot's outcome, keyed by the model that produced it.
         if (successModel) {
           result.rawOutputs[successModel] = successText;
@@ -820,14 +865,18 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
         fallbackTasks.push(t);
       }
     }
+    const consolidatedFallback = consolidateReviewerTasks(fallbackTasks);
 
     // 5. Aggregator → strict JSON (streamed). Uses the same retry strategy
     //    as the reviewers: same-model retry first (with raised token budget
     //    for truncation), then spare-model failover as last resort.
+    //    After LLM judges fail, a compact table-only attempt runs once; if
+    //    that also fails, we use the deterministic consolidated fallback so
+    //    the run still ends with a clean priority list.
     yield { phase: "aggregator", message: "Aggregating findings…", model: aggregatorModel };
-    const aggPrompt = buildAggregatorPrompt(config, successfulOutputs, fallbackTasks, aggregatorModel);
-    const aggMessages: ProviderMessage[] = [
-      { role: "system", content: "You are an adversarial adjudicator for a committee code review. You verify findings against evidence, reject unsupported claims, and resolve disagreements from the code rather than by reviewer vote. You return ONLY a JSON object, no prose, no markdown fences." },
+    const aggPrompt = buildAggregatorPrompt(config, successfulOutputs, consolidatedFallback, aggregatorModel);
+    const baseAggMessages: ProviderMessage[] = [
+      { role: "system", content: AGGREGATOR_SYSTEM },
       { role: "user", content: aggPrompt },
     ];
 
@@ -837,10 +886,12 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     let aggFinishReason: string | undefined;
     let aggError: string | null = null;
     let aggSuccess = false;
+    let parsedTasks: ReviewTask[] = [];
     const MAX_AGGREGATOR_FAILOVER = 2;
     let aggTokenBudgetIdx = 0;
     let aggSameModelRetries = 0;
     let aggSpareFailovers = 0;
+    let aggUseJsonNudge = false;
 
     while (true) {
       aggRaw = "";
@@ -850,8 +901,18 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
       let aggStarted = false;
       const aggKey = `aggregator:${actualAggModel}`;
       const aggMaxTokens = TOKEN_BUDGETS[aggTokenBudgetIdx];
+      const attemptMessages: ProviderMessage[] = aggUseJsonNudge
+        ? [
+            ...baseAggMessages,
+            {
+              role: "assistant",
+              content: "(previous attempt produced analysis without a parseable JSON tasks array)",
+            },
+            { role: "user", content: AGGREGATOR_JSON_NUDGE },
+          ]
+        : baseAggMessages;
       try {
-        for await (const ev of provider.chat(aggMessages, { model: actualAggModel, temperature: 0.3, maxTokens: aggMaxTokens, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
+        for await (const ev of provider.chat(attemptMessages, { model: actualAggModel, temperature: 0.2, maxTokens: aggMaxTokens, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
           if (ev.type === "text.delta") {
             const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
             aggRaw += chunk;
@@ -888,14 +949,15 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
         aggError = e instanceof Error ? e.message : String(e);
       }
 
-      // Try to parse JSON from the content. If the judge returned valid
-      // JSON (even with an empty tasks array), we're done — {"tasks": []}
+      // Try to parse JSON from content and/or reasoning. If the judge returned
+      // valid JSON (even with an empty tasks array), we're done — {"tasks": []}
       // is a correct response when there are no findings to aggregate.
       // Only retry/failover when no JSON could be parsed at all.
-      const parsed = parseAggregatorJSON(aggRaw);
+      const parsed = parseAggregatorResponse(aggRaw, aggReasoning);
       if (parsed.parsed) {
         aggSuccess = true;
-        result.aggregatorOutput = aggRaw;
+        parsedTasks = parsed.tasks;
+        result.aggregatorOutput = aggRaw || (parsed.tasks.length ? JSON.stringify({ tasks: parsed.tasks }, null, 2) : '{"tasks":[]}');
         if (aggReasoning) result.aggregatorReasoning = aggReasoning;
         break;
       }
@@ -909,6 +971,8 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
         aggError = `Aggregator hit token limit during reasoning (${aggReasoning.length} chars, finish: length) — no JSON emitted`;
       } else if (degenerate) {
         aggError = `Aggregator reasoning is degenerate/repetitive (${aggReasoning.length} chars) — no JSON emitted`;
+      } else if (!aggRaw.trim() && aggReasoning.trim()) {
+        aggError = `Aggregator produced ${aggReasoning.length} chars of reasoning but no JSON content`;
       } else if (!aggRaw.trim()) {
         aggError = "Aggregator returned empty output — no JSON emitted";
       } else {
@@ -918,6 +982,7 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
       // Strategy 1: Truncation → raise token budget, retry same model.
       if (truncated && aggTokenBudgetIdx < TOKEN_BUDGETS.length - 1) {
         aggTokenBudgetIdx++;
+        aggUseJsonNudge = true; // after a truncation, demand JSON-only
         const newBudget = TOKEN_BUDGETS[aggTokenBudgetIdx];
         result.aggregatorRetries ??= [];
         result.aggregatorRetries.push({ model: actualAggModel, reason: aggError, maxTokens: newBudget });
@@ -925,9 +990,11 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
         continue;
       }
 
-      // Strategy 2: Transient failure (not degenerate) → retry same model.
+      // Strategy 2: Transient / no-JSON failure → retry same model once with
+      // a strict JSON-only nudge (more effective than replaying the huge prompt).
       if (!degenerate && aggSameModelRetries < MAX_SAME_MODEL_RETRIES) {
         aggSameModelRetries++;
+        aggUseJsonNudge = true;
         result.aggregatorRetries ??= [];
         result.aggregatorRetries.push({ model: actualAggModel, reason: aggError, maxTokens: TOKEN_BUDGETS[aggTokenBudgetIdx] });
         yield { phase: "aggregator.retry", model: actualAggModel, reason: aggError, maxTokens: TOKEN_BUDGETS[aggTokenBudgetIdx] };
@@ -940,6 +1007,7 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
       if (!spare) break;
       aggSpareFailovers++;
       aggSameModelRetries = 0;
+      aggUseJsonNudge = false; // fresh model gets the full prompt first
       result.aggregatorFailovers ??= [];
       result.aggregatorFailovers.push({ from: actualAggModel, to: spare, reason: aggError });
       yield { phase: "aggregator.failover", from: actualAggModel, to: spare, reason: aggError };
@@ -949,19 +1017,70 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     // Reflect the actual model that served the aggregator.
     result.aggregatorModel = actualAggModel;
 
-    // If we never got parseable JSON, keep whatever content we have for the
-    // table-parse fallback. Also keep reasoning for the raw output.
+    // Compact table-only LLM attempt when full-context judges all failed.
+    if (!aggSuccess && consolidatedFallback.length > 0) {
+      yield { phase: "aggregator", message: "Judges failed — compact re-aggregate from tables…", model: actualAggModel };
+      const compactMessages: ProviderMessage[] = [
+        { role: "system", content: AGGREGATOR_SYSTEM },
+        { role: "user", content: buildCompactAggregatorPrompt(consolidatedFallback) },
+      ];
+      aggRaw = "";
+      aggReasoning = "";
+      try {
+        for await (const ev of provider.chat(compactMessages, {
+          model: actualAggModel,
+          temperature: 0.1,
+          maxTokens: TOKEN_BUDGETS[Math.min(aggTokenBudgetIdx, TOKEN_BUDGETS.length - 1)],
+          signal: opts.signal,
+          deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS,
+          sessionId,
+        })) {
+          if (ev.type === "text.delta") {
+            const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
+            aggRaw += chunk;
+            yield { phase: "aggregator.delta", text: chunk };
+          } else if (ev.type === "reasoning.delta") {
+            const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
+            aggReasoning += chunk;
+            yield { phase: "aggregator.reasoning", text: chunk };
+          } else if (ev.type === "error") {
+            throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Aggregator error");
+          }
+        }
+        const compactParsed = parseAggregatorResponse(aggRaw, aggReasoning);
+        if (compactParsed.parsed) {
+          aggSuccess = true;
+          parsedTasks = compactParsed.tasks;
+          result.aggregatorOutput = aggRaw || JSON.stringify({ tasks: compactParsed.tasks }, null, 2);
+          if (aggReasoning) result.aggregatorReasoning = (result.aggregatorReasoning ?? "") + (result.aggregatorReasoning ? "\n\n" : "") + aggReasoning;
+          result.aggregatorRetries ??= [];
+          result.aggregatorRetries.push({
+            model: actualAggModel,
+            reason: "compact table-only re-aggregate after judge failure",
+            maxTokens: TOKEN_BUDGETS[Math.min(aggTokenBudgetIdx, TOKEN_BUDGETS.length - 1)],
+          });
+        }
+      } catch {
+        // Fall through to deterministic consolidate.
+      }
+    }
+
+    // If we never got parseable JSON, keep whatever content we have for debug
+    // and use the deterministic consolidated fallback for the task list.
     if (!aggSuccess) {
       result.aggregatorOutput = aggRaw;
       if (aggReasoning) result.aggregatorReasoning = aggReasoning;
     }
 
-    const parsed = parseAggregatorJSON(aggRaw);
-    let tasks = parsed.tasks;
-
-    // Fall back to table parse.
-    if (tasks.length === 0 && fallbackTasks.length > 0) {
-      tasks = fallbackTasks;
+    let tasks: ReviewTask[];
+    if (aggSuccess) {
+      // Trust the judge, including {"tasks": []} — do NOT overwrite with tables.
+      tasks = parsedTasks;
+      result.taskListSource = "aggregator";
+    } else {
+      yield { phase: "parse", message: "Judge produced no JSON — using consolidated reviewer tables…" };
+      tasks = consolidatedFallback;
+      result.taskListSource = "fallback";
     }
 
     // Ensure every task has an issue body + labels, and backfill structured
@@ -1116,19 +1235,21 @@ export async function* runAggregateOnly(opts: AggregateOnlyOptions): AsyncIterab
         fallbackTasks.push(t);
       }
     }
+    const consolidatedFallback = consolidateReviewerTasks(fallbackTasks);
 
-    // 2. Aggregator → strict JSON (streamed).
+    // 2. Aggregator → strict JSON (streamed). Upload path is single-shot;
+    //    on failure we still return a clean consolidated table list.
     yield { phase: "aggregator", message: "Aggregating findings…", model: aggregatorModel };
-    const aggPrompt = buildAggregatorPrompt(config, reviewerOutputs, fallbackTasks, aggregatorModel);
+    const aggPrompt = buildAggregatorPrompt(config, reviewerOutputs, consolidatedFallback, aggregatorModel);
     const aggMessages: ProviderMessage[] = [
-      { role: "system", content: "You are an adversarial adjudicator for a committee code review. You verify findings against evidence, reject unsupported claims, and resolve disagreements from the code rather than by reviewer vote. You return ONLY a JSON object, no prose, no markdown fences." },
+      { role: "system", content: AGGREGATOR_SYSTEM },
       { role: "user", content: aggPrompt },
     ];
     let aggRaw = "";
     let aggReasoning = "";
     let aggStarted = false;
     const aggKey = `aggregator:${aggregatorModel}`;
-    for await (const ev of provider.chat(aggMessages, { model: aggregatorModel, temperature: 0.3, maxTokens: 8192, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
+    for await (const ev of provider.chat(aggMessages, { model: aggregatorModel, temperature: 0.2, maxTokens: 16384, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
       if (ev.type === "text.delta") {
         const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
         aggRaw += chunk;
@@ -1162,10 +1283,18 @@ export async function* runAggregateOnly(opts: AggregateOnlyOptions): AsyncIterab
 
     result.aggregatorOutput = aggRaw;
     if (aggReasoning) result.aggregatorReasoning = aggReasoning;
-    const parsed = parseAggregatorJSON(aggRaw);
-    let tasks = parsed.tasks;
-    if (tasks.length === 0 && fallbackTasks.length > 0) {
-      tasks = fallbackTasks;
+    const parsed = parseAggregatorResponse(aggRaw, aggReasoning);
+    let tasks: ReviewTask[];
+    if (parsed.parsed) {
+      tasks = parsed.tasks;
+      result.taskListSource = "aggregator";
+      if (!aggRaw.trim() && parsed.tasks.length > 0) {
+        result.aggregatorOutput = JSON.stringify({ tasks: parsed.tasks }, null, 2);
+      }
+    } else {
+      yield { phase: "parse", message: "Judge produced no JSON — using consolidated reviewer tables…" };
+      tasks = consolidatedFallback;
+      result.taskListSource = "fallback";
     }
 
     for (const t of tasks) {

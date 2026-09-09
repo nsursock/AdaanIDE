@@ -239,10 +239,12 @@ test("reviewer failover: when all models (primary + spares) fail, the run errors
   assert.match(errEvent.message, /All reviewer models failed/i);
 });
 
-test("reviewer failover: partial text (>200 chars) is preserved, no failover", async () => {
-  const provider = new FailoverProvider();
-  // Make m/a:free stream a long partial response then error.
-  class PartialProvider extends FailoverProvider {
+test("reviewer retry: partial text (>200 chars) before stream error retries same model, then fails over if retry also errors", async () => {
+  // Stream errors (JSON in SSE, fetch failed, terminated) are transient
+  // infrastructure issues, not model failures. The same model should be
+  // retried first. Only if the retry also errors should we failover to a
+  // spare. The partial output is preserved as a last-resort fallback.
+  class PartialErrorProvider extends FailoverProvider {
     async *chat(messages: ProviderMessage[], options: ProviderChatOptions): AsyncIterable<ProviderEvent> {
       const system = String(messages[0]?.content ?? "");
       const isAggregator = system.includes("ONLY a JSON object");
@@ -253,24 +255,37 @@ test("reviewer failover: partial text (>200 chars) is preserved, no failover", a
         return;
       }
       if (model === "m/a:free") {
+        // Always errors after streaming partial text — simulates a
+        // persistent transport issue (not a model-specific failure).
         yield { type: "text.delta", data: { text: "x".repeat(250) } };
-        yield { type: "error", data: { message: "stopped early" } };
+        yield { type: "error", data: { message: "JSON error injected into SSE stream" } };
         return;
       }
       if (this.emptyModels.has(model)) return;
       yield { type: "text.delta", data: { text: `findings from ${model}` } };
     }
   }
-  const p = new PartialProvider();
+  const p = new PartialErrorProvider();
   const cfg = config();
 
   const { events, result } = await drain(runReview({ config: cfg, workspace, provider: p, triggeredBy: "manual" }));
 
+  // Same-model retry should fire first (transient error).
+  const retries = events.filter((e) => e.phase === "committee.retry") as any[];
+  assert.ok(retries.length >= 1, "same-model retry emitted for stream error with partial text");
+  assert.equal(retries[0].model, "m/a:free", "retry is on the same model");
+  assert.match(retries[0].reason, /JSON error|stopped early|stream/i, "retry reason mentions the stream error");
+
+  // After the retry also errors, failover to a spare.
   const failovers = events.filter((e) => e.phase === "committee.failover") as any[];
-  assert.equal(failovers.length, 0, "no failover when partial text is preserved");
-  assert.equal(result?.status, "complete");
-  const raw = result!.rawOutputs["m/a:free"];
-  assert.ok(raw && raw.includes("[NOTE: Reviewer stopped early"), "partial text preserved with NOTE");
+  assert.ok(failovers.length >= 1, "failover triggered after same-model retry also errored");
+  assert.equal(failovers[0].from, "m/a:free");
+
+  assert.equal(result?.status, "complete", "run completes via failover to a spare");
+  assert.ok(result!.rawOutputs["m/spare1:free"], "spare output recorded");
+  // The errored model's partial output should NOT be in rawOutputs — the
+  // spare succeeded, so its full output is used instead.
+  assert.ok(!result!.rawOutputs["m/a:free"], "partial output not used when spare succeeds");
 });
 
 test("reviewer failover: reasoning-only model (finish: stop, diverse) uses reasoning as output, no failover", async () => {
@@ -441,6 +456,8 @@ test("aggregator: valid empty JSON ({\"tasks\": []}) does NOT trigger failover",
   assert.equal(result?.status, "complete", "run completes");
   assert.equal(result!.aggregatorModel, "m/agg", "aggregatorModel unchanged (no failover)");
   assert.ok(!result!.aggregatorFailovers || result!.aggregatorFailovers.length === 0, "no failovers recorded");
+  assert.equal(result!.taskListSource, "aggregator", "empty JSON is trusted — not overwritten by table fallback");
+  assert.equal(result!.tasks.length, 0, "empty adjudicated list preserved");
 });
 
 // ---------------------------------------------------------------------------
@@ -652,4 +669,287 @@ test("aggregator same-model retry: truncation triggers retry with raised budget 
   assert.equal(result!.aggregatorModel, "m/agg", "aggregatorModel unchanged (no failover)");
   assert.ok(result!.aggregatorRetries && result!.aggregatorRetries.length >= 1, "retry recorded in result metadata");
   assert.ok(!result!.aggregatorFailovers || result!.aggregatorFailovers.length === 0, "no failovers recorded");
+});
+
+// ---------------------------------------------------------------------------
+// Partial-output-as-last-resort tests — when all retries and spares fail,
+// partial output from an earlier attempt is preserved rather than discarded.
+// ---------------------------------------------------------------------------
+
+test("reviewer retry: stream error then success on retry — partial saved but not used", async () => {
+  // Model errors on the first call (after partial text), succeeds on the
+  // retry. The partial output is saved as fallback but NOT used because the
+  // retry succeeds.
+  class RetrySucceedsProvider implements LLMProvider {
+    callCount = new Map<string, number>();
+    calls: string[] = [];
+
+    async *chat(messages: ProviderMessage[], options: ProviderChatOptions): AsyncIterable<ProviderEvent> {
+      const system = String(messages[0]?.content ?? "");
+      const isAggregator = system.includes("ONLY a JSON object");
+      const model = (options as { model: string }).model;
+      this.calls.push(model);
+      if (isAggregator) {
+        yield { type: "text.delta", data: { text: AGG_JSON } };
+        return;
+      }
+      const count = (this.callCount.get(model) ?? 0) + 1;
+      this.callCount.set(model, count);
+      if (model === "m/a:free" && count === 1) {
+        // First call: partial text then stream error.
+        yield { type: "text.delta", data: { text: "x".repeat(250) } };
+        yield { type: "error", data: { message: "terminated" } };
+        return;
+      }
+      yield { type: "text.delta", data: { text: `findings from ${model} (call ${count})` } };
+    }
+
+    async listModels() {
+      return {
+        free: [
+          { id: "m/a:free", name: "A", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/b:free", name: "B", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/spare1:free", name: "Spare1", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/spare2:free", name: "Spare2", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/agg", name: "Agg", pricing: { prompt: "0", completion: "0" } },
+        ] as any,
+        paid: [],
+      };
+    }
+  }
+
+  const provider = new RetrySucceedsProvider();
+  const cfg = config();
+
+  const { events, result } = await drain(runReview({ config: cfg, workspace, provider, triggeredBy: "manual" }));
+
+  const retries = events.filter((e) => e.phase === "committee.retry") as any[];
+  const failovers = events.filter((e) => e.phase === "committee.failover") as any[];
+
+  assert.ok(retries.length >= 1, "same-model retry emitted after stream error");
+  assert.equal(retries[0].model, "m/a:free", "retry is on the same model");
+  assert.equal(failovers.length, 0, "no failover — retry succeeded");
+
+  assert.equal(result?.status, "complete", "run completes via same-model retry");
+  const raw = result!.rawOutputs["m/a:free"];
+  assert.ok(raw, "output recorded under the original model");
+  assert.ok(raw!.includes("call 2"), "output is from the successful retry, not the partial");
+  assert.ok(!raw!.includes("[NOTE: Reviewer stopped early"), "partial NOTE not present — retry succeeded");
+});
+
+test("reviewer retry: all retries and spares fail — partial output preserved as last resort", async () => {
+  // Every model errors after streaming partial text. The original model's
+  // partial output should be preserved as a last resort rather than
+  // discarding it entirely.
+  class AllFailPartialProvider implements LLMProvider {
+    calls: string[] = [];
+
+    async *chat(messages: ProviderMessage[], options: ProviderChatOptions): AsyncIterable<ProviderEvent> {
+      const system = String(messages[0]?.content ?? "");
+      const isAggregator = system.includes("ONLY a JSON object");
+      const model = (options as { model: string }).model;
+      this.calls.push(model);
+      if (isAggregator) {
+        yield { type: "text.delta", data: { text: AGG_JSON } };
+        return;
+      }
+      // Every reviewer model errors after partial text.
+      yield { type: "text.delta", data: { text: `partial findings from ${model} `.repeat(20) } };
+      yield { type: "error", data: { message: "upstream connection reset" } };
+    }
+
+    async listModels() {
+      return {
+        free: [
+          { id: "m/a:free", name: "A", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/b:free", name: "B", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/spare1:free", name: "Spare1", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/spare2:free", name: "Spare2", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/agg", name: "Agg", pricing: { prompt: "0", completion: "0" } },
+        ] as any,
+        paid: [],
+      };
+    }
+  }
+
+  const provider = new AllFailPartialProvider();
+  const cfg = config();
+
+  const { events, result } = await drain(runReview({
+    config: cfg,
+    workspace,
+    provider,
+    triggeredBy: "manual",
+  }));
+
+  // m/b:free succeeds (it also errors, but its partial is preserved).
+  // The run should still complete because partial outputs count as outputs.
+  assert.equal(result?.status, "complete", "run completes with partial outputs as last resort");
+
+  // At least one reviewer should have partial output with a NOTE.
+  const partialOutputs = Object.entries(result!.rawOutputs).filter(
+    ([, v]) => v && v.includes("[NOTE: Reviewer stopped early"),
+  );
+  assert.ok(partialOutputs.length > 0, "at least one partial output preserved with NOTE");
+});
+
+// ---------------------------------------------------------------------------
+// Truncated non-empty output tests — finish: length with content should
+// trigger budget escalation, not be accepted as success.
+// ---------------------------------------------------------------------------
+
+test("reviewer retry: truncated non-empty output (finish: length) triggers budget escalation, not silent acceptance", async () => {
+  // Model produces non-empty text but hits the token limit (finish: length).
+  // This should NOT be accepted as success — it should retry with a higher
+  // budget. On the retry with enough tokens, the model completes normally.
+  class TruncatedContentProvider implements LLMProvider {
+    successThresholds = new Map<string, number>();
+    calls: { model: string; maxTokens: number }[] = [];
+
+    async *chat(messages: ProviderMessage[], options: ProviderChatOptions): AsyncIterable<ProviderEvent> {
+      const system = String(messages[0]?.content ?? "");
+      const isAggregator = system.includes("ONLY a JSON object");
+      const model = (options as { model: string }).model;
+      const maxTokens = (options as { maxTokens?: number }).maxTokens ?? 8192;
+      this.calls.push({ model, maxTokens });
+      if (isAggregator) {
+        yield { type: "text.delta", data: { text: AGG_JSON } };
+        return;
+      }
+      const threshold = this.successThresholds.get(model);
+      if (threshold !== undefined && maxTokens < threshold) {
+        // Not enough tokens — produce real but incomplete content, then
+        // hit the token limit. This is the Gemini case: the model produced
+        // some text but was cut off mid-output.
+        yield { type: "text.delta", data: { text: "Wait! How does model.load work? Let me check. ".repeat(50) } };
+        yield { type: "finish", data: { finishReason: "length", model } };
+        return;
+      }
+      yield { type: "text.delta", data: { text: `complete findings from ${model} at maxTokens=${maxTokens}` } };
+    }
+
+    async listModels() {
+      return {
+        free: [
+          { id: "m/a:free", name: "A", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/b:free", name: "B", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/spare1:free", name: "Spare1", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/spare2:free", name: "Spare2", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/agg", name: "Agg", pricing: { prompt: "0", completion: "0" } },
+        ] as any,
+        paid: [],
+      };
+    }
+  }
+
+  const provider = new TruncatedContentProvider();
+  // m/a:free needs 16384 tokens to complete — it truncates at 8192.
+  provider.successThresholds.set("m/a:free", 16384);
+  const cfg = config();
+
+  const { events, result } = await drain(runReview({ config: cfg, workspace, provider, triggeredBy: "manual" }));
+
+  const retries = events.filter((e) => e.phase === "committee.retry") as any[];
+  const failovers = events.filter((e) => e.phase === "committee.failover") as any[];
+
+  assert.ok(retries.length >= 1, "same-model retry emitted for truncated non-empty output");
+  assert.equal(retries[0].model, "m/a:free", "retry is on the same model");
+  assert.equal(retries[0].maxTokens, 16384, "retry uses raised budget");
+  assert.match(retries[0].reason, /truncat/i, "retry reason mentions truncation");
+  assert.equal(failovers.length, 0, "no failover — budget escalation succeeded");
+
+  assert.equal(result?.status, "complete", "run completes via budget escalation");
+  const raw = result!.rawOutputs["m/a:free"];
+  assert.ok(raw, "output recorded under the original model");
+  assert.ok(raw!.includes("complete findings"), "output is from the successful retry, not the truncated attempt");
+  assert.ok(!raw!.includes("Wait! How does"), "truncated content not in final output");
+});
+
+test("aggregator: JSON only in reasoning channel is accepted", async () => {
+  class ReasoningJsonAggProvider extends FailoverProvider {
+    async *chat(messages: ProviderMessage[], options: ProviderChatOptions): AsyncIterable<ProviderEvent> {
+      const system = String(messages[0]?.content ?? "");
+      const isAggregator = system.includes("ONLY a JSON object");
+      const model = (options as { model: string }).model;
+      this.calls.push(model);
+      if (isAggregator) {
+        yield { type: "reasoning.delta", data: { text: `Cataloging findings…\n${AGG_JSON}` } };
+        yield { type: "finish", data: { finishReason: "stop", model } };
+        return;
+      }
+      yield { type: "text.delta", data: { text: `findings from ${model}` } };
+    }
+  }
+  const provider = new ReasoningJsonAggProvider();
+  const { events, result } = await drain(runReview({ config: config(), workspace, provider, triggeredBy: "manual" }));
+  const failovers = events.filter((e) => e.phase === "aggregator.failover");
+  assert.equal(failovers.length, 0, "no failover when JSON is in reasoning");
+  assert.equal(result?.taskListSource, "aggregator");
+  assert.ok(result!.tasks.length >= 1, "tasks parsed from reasoning JSON");
+  assert.equal(result!.tasks[0].issue, "Fake finding");
+});
+
+test("aggregator: all judges fail → consolidated table fallback yields a clean priority list", async () => {
+  const TABLE_A = `
+## Priority list
+| Priority | Issue | Main finding | Fix | Lens(es) | Reviewer(s) | Impact |
+| --- | --- | --- | --- | --- | --- | --- |
+| P0 | Volatility lookahead leakage | mx.roll leaks terminal close into t=0 | Use causal diff | DASC | Gemini | Corrupts every dataset |
+| P1 | OHLC invariant not enforced | close can exceed high | Clamp OHLC | STAT | Gemini | Invalid candles |
+`;
+  const TABLE_B = `
+## Priority list
+| Priority | Issue | Main finding | Fix | Lens(es) | Reviewer(s) | Impact |
+| --- | --- | --- | --- | --- | --- | --- |
+| P2 | Volatility channel look-ahead contamination | first row uses future close via roll | Mask index 0 | DASC | GPT | Silent look-ahead bias |
+| P1 | Candlestick bounding invariant violation | highs/lows omit close | Derive high/low from all prices | STAT | GPT | Broken charts |
+`;
+
+  class AllAggFailProvider implements LLMProvider {
+    async *chat(messages: ProviderMessage[], options: ProviderChatOptions): AsyncIterable<ProviderEvent> {
+      const system = String(messages[0]?.content ?? "");
+      const isAggregator = system.includes("ONLY a JSON object");
+      const model = (options as { model: string }).model;
+      if (isAggregator) {
+        // Every judge attempt (full, nudge, spare, compact) dumps CoT only.
+        yield { type: "reasoning.delta", data: { text: `Let me reconsider the clustering one more time. `.repeat(80) } };
+        yield { type: "finish", data: { finishReason: "stop", model } };
+        return;
+      }
+      if (model === "m/a:free") {
+        yield { type: "text.delta", data: { text: TABLE_A } };
+        return;
+      }
+      yield { type: "text.delta", data: { text: TABLE_B } };
+    }
+
+    async listModels() {
+      return {
+        free: [
+          { id: "m/a:free", name: "A", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/b:free", name: "B", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/spare1:free", name: "Spare1", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/spare2:free", name: "Spare2", pricing: { prompt: "0", completion: "0" } },
+          { id: "m/agg", name: "Agg", pricing: { prompt: "0", completion: "0" } },
+        ] as any,
+        paid: [],
+      };
+    }
+  }
+
+  const { result } = await drain(runReview({
+    config: config(),
+    workspace,
+    provider: new AllAggFailProvider(),
+    triggeredBy: "manual",
+  }));
+
+  assert.equal(result?.status, "complete");
+  assert.equal(result?.taskListSource, "fallback", "task list comes from consolidated tables");
+  assert.equal(result!.tasks.length, 2, "near-duplicate rows merged to 2 root causes");
+  assert.equal(result!.tasks[0].priority, "P0");
+  const issues = result!.tasks.map((t) => t.issue.toLowerCase()).join(" | ");
+  assert.match(issues, /volatil|lookahead|look/);
+  assert.match(issues, /ohlc|candlestick|invariant/);
+  assert.ok(result!.tasks.every((t) => t.issueBody && t.labels.length > 0), "fallback tasks get bodies/labels");
 });
