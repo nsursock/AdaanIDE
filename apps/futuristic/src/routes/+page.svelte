@@ -47,6 +47,15 @@
   let showSettings = $state(false);
   let showTerminal = $state(settingsStore.settings.terminalEnabled);
 
+  // --- Soft-mount tracking ---------------------------------------------------
+  // Components with live streaming state (SSE connections, running progress)
+  // are soft-mounted: once created, they stay in the DOM but are hidden with
+  // CSS when their mode is inactive. This preserves their state and
+  // connections across tab switches — the user can browse other tabs and
+  // come back to an intact monitoring view.
+  let monitoringMounted = $state(false);
+  $effect(() => { if (mode === "monitoring") monitoringMounted = true; });
+
   // --- Resizable sidebars ---------------------------------------------------
   // Widths are seeded from the unified settings store and written back on
   // drag-end. Local state holds the live value during a drag.
@@ -351,6 +360,18 @@
       </header>
 
       <!-- Mode-specific content -->
+      <!-- Monitoring panel is soft-mounted: once created it stays in the DOM
+           hidden with CSS so its SSE stream and local state survive tab
+           switches. The user can browse editor/agent/stats and come back to
+           an intact monitoring view with live progress preserved. -->
+      {#if monitoringMounted}
+        <div
+          class="flex-1 flex flex-col overflow-hidden min-w-0"
+          style="display: {mode === 'monitoring' ? 'flex' : 'none'};"
+        >
+          <ReviewPanel {workspaceRoot} />
+        </div>
+      {/if}
       {#if mode === "stats"}
         <StatsView {workspaceRoot} />
       {:else if mode === "agent"}
@@ -383,9 +404,7 @@
             </div>
           </div>
         </div>
-      {:else if mode === "monitoring"}
-        <ReviewPanel {workspaceRoot} />
-      {:else}
+      {:else if mode !== "monitoring"}
         <!-- Editor mode: classic 3-pane layout -->
         <div class="flex-1 flex overflow-hidden gap-1 p-1" style="background: rgba(var(--bg-deep-rgb), 0.4);">
           {#if showSidebar}

@@ -16,11 +16,62 @@ import type {
 import { reviewId, reviewStore } from "./store.js";
 import { parsePriorityTable, parseAggregatorJSON, buildIssueBody, buildLabels, backfillTaskFields, lensCode } from "./parse.js";
 import { mergeTaskList, buildTasksMarkdown } from "./tasklist.js";
-import { resolveReviewerModels, resolveAggregatorModel, isAutoAggregator, pickAutoAggregator, estimateReviewCost, findModel, fetchModelsByTier, fetchAllGenerationMetadata } from "./models.js";
+import { resolveReviewerModels, resolveAggregatorModel, isAutoAggregator, pickAutoAggregator, estimateReviewCost, findModel, fetchModelsByTier, fetchAllGenerationMetadata, poolForTier } from "./models.js";
 
 const execAsync = promisify(exec);
 
+/** Max spare-model attempts per reviewer slot when the primary model errors
+ *  out or returns empty output. Spares are drawn from the same tier pool as
+ *  the reviewers (excluding models already assigned as reviewers), so a
+ *  single transient 429/ResourceExhausted or empty response no longer kills
+ *  the whole run. */
+const MAX_REVIEWER_FAILOVER = 2;
+
+/** Token budget escalation steps for truncation (finish: length). When a
+ *  model hits the token limit, retry the SAME model with a higher budget
+ *  before swapping to a spare — truncation is a budget problem, not a model
+ *  problem, and a different model with the same budget will truncate too. */
+const TOKEN_BUDGETS = [8192, 16384, 32768];
+
+/** Max same-model retries for non-truncation failures (empty output, stream
+ *  error). These are often transient/non-deterministic — retrying the same
+ *  model is cheaper and more predictable than swapping to an unknown spare. */
+const MAX_SAME_MODEL_RETRIES = 1;
+
 function estTokens(s: string): number { return Math.ceil(s.length / 4); }
+
+/** Detect tool-call-like output — some free models (e.g. Liquid lfm-2.5)
+ *  ignore the review prompt and hallucinate tool calls instead, producing
+ *  output like `<|tool_call_start|>[find_pattern(...)]<|tool_call_end|>`.
+ *  This is not a review — it's a model that didn't follow the prompt. */
+function isToolCallOutput(text: string): boolean {
+  return /<\|tool_call(?:_start|_end)?\|>/.test(text);
+}
+
+/** Detect degenerate/repetitive output — a model stuck in a reasoning loop
+ *  that repeats the same sentence with minor variations (common with free
+ *  reasoning models that hit the token limit). Splits into sentences and
+ *  checks if any single sentence template accounts for >40% of the total.
+ *  This catches the "The PPO class also has a _compile_update method..."
+ *  pattern where the model fills the entire token budget with variations
+ *  of the same sentence. */
+function isDegenerate(text: string, minLen = 500): boolean {
+  if (text.length < minLen) return false;
+  const sentences = text.split(/[.!?]\n/).map((s) => s.trim()).filter((s) => s.length > 30);
+  if (sentences.length < 10) return false;
+  // Normalize for comparison: lowercase, collapse whitespace, strip
+  // trailing variable words.
+  const normalized = sentences.map((s) => s.toLowerCase().replace(/\s+/g, " "));
+  // Check for a dominant repeating prefix (first 40 chars) — catches
+  // "The PPO class also has a _compile_update method that uses mx.grad
+  // and optimizer. It may have issues with the [X]." where only the
+  // last word changes.
+  const prefixes = normalized.map((s) => s.slice(0, 40));
+  const counts = new Map<string, number>();
+  for (const p of prefixes) counts.set(p, (counts.get(p) ?? 0) + 1);
+  const maxCount = Math.max(...counts.values());
+  return maxCount / sentences.length > 0.4;
+}
 
 /** After a run completes, fetch actual generation metadata from the
  *  OpenRouter Generation API for every captured generation ID. This
@@ -414,6 +465,27 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     result.reviewerModels = reviewerIds;
     result.aggregatorModel = aggregatorModel;
 
+    // Spare model pool for reviewer failover: same tier as the reviewers,
+    // minus any model already assigned as a reviewer (so a failover never
+    // duplicates an in-flight reviewer) and minus the aggregator model (the
+    // judge must stay independent from the committee). Consumed atomically by
+    // failing slots — `shift()` is synchronous so there's no race between the
+    // empty-check and the pop across parallel reviewer promises.
+    const reviewerIdSet = new Set(reviewerIds);
+    const sparePool: string[] = poolForTier(config.modelTier, free, paid)
+      .map((m) => m.id)
+      .filter((id) => !reviewerIdSet.has(id) && id !== aggregatorModel);
+    const takeSpare = (): string | null => (sparePool.length > 0 ? sparePool.shift()! : null);
+
+    // Spare pool for aggregator failover: same tier, minus all reviewer
+    // models (the judge must stay independent) and minus the original
+    // aggregator. Built from the same pool but tracked separately so
+    // reviewer failovers don't starve the aggregator and vice-versa.
+    const aggSparePool: string[] = poolForTier(config.modelTier, free, paid)
+      .map((m) => m.id)
+      .filter((id) => !reviewerIdSet.has(id) && id !== aggregatorModel);
+    const takeAggSpare = (): string | null => (aggSparePool.length > 0 ? aggSparePool.shift()! : null);
+
     const aggModelInfo = findModel(allModels, aggregatorModel)
       ?? allModels.find((m) => m.id.startsWith(aggregatorModel + "-") || m.id.startsWith(aggregatorModel));
 
@@ -460,6 +532,8 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
     // generator loop yields them as they arrive.
     const deltaQueue: { model: string; reviewerIndex: number; text: string }[] = [];
     const queuedQueue: { model: string; reviewerIndex: number }[] = [];
+    const failoverQueue: { from: string; to: string; reviewerIndex: number; reason: string }[] = [];
+    const retryQueue: { model: string; reviewerIndex: number; reason: string; maxTokens: number }[] = [];
     let deltaNotify: (() => void) | null = null;
     let reviewersDone = false;
 
@@ -473,59 +547,194 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
       deltaNotify?.();
     };
 
+    const pushFailover = (from: string, to: string, reviewerIndex: number, reason: string) => {
+      failoverQueue.push({ from, to, reviewerIndex, reason });
+      deltaNotify?.();
+    };
+
+    const pushRetry = (model: string, reviewerIndex: number, reason: string, maxTokens: number) => {
+      retryQueue.push({ model, reviewerIndex, reason, maxTokens });
+      deltaNotify?.();
+    };
+
     const reviewerPromises = reviewerIds
       .map((model, index) => ({ model, index }))
       .filter(({ model }) => pendingModels.includes(model))
       .map(async ({ model, index }) => {
-        let text = "";
-        let started = false;
-        const reviewerKey = `reviewer:${model}`;
-        try {
-          for await (const ev of provider.chat(committeeMessages, { model, temperature: 0.3, maxTokens: 8192, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
-            if (ev.type === "text.delta") {
-              const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
-              text += chunk;
-              started = true;
-              pushDelta(model, index, chunk);
-            } else if (ev.type === "provider.started") {
-              const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
-              if (genId) {
-                result.generationIds ??= {};
-                result.generationIds[reviewerKey] = genId;
+        let currentModel = model;
+        let lastError: string | null = null;
+        let successModel: string | null = null;
+        let successText = "";
+        let tokenBudgetIdx = 0;
+        let sameModelRetries = 0;
+        let spareFailovers = 0;
+
+        // Retry strategy (in order of preference):
+        // 1. Truncation (finish: length) → retry SAME model with a higher
+        //    token budget. Truncation is a budget problem, not a model
+        //    problem — a different model with the same budget will truncate
+        //    too.
+        // 2. Transient failure (empty output, stream error) → retry SAME
+        //    model once with the same params. These are often non-deterministic.
+        // 3. Model-specific failure (tool-call syntax, degenerate reasoning)
+        //    → swap to a SPARE model immediately. The model can't or won't
+        //    do the task; retrying it won't help.
+        // 4. Same-model retries exhausted → swap to a SPARE model.
+        while (true) {
+          let text = "";
+          let reasoning = "";
+          let started = false;
+          let finishReason: string | undefined;
+          const reviewerKey = `reviewer:${currentModel}`;
+          let attemptError: string | null = null;
+          // Reset per-iteration — the reasoning guard may set this to a
+          // specific message (truncated/degenerate), but it must not leak
+          // into the next attempt's "no usable output" fallback.
+          lastError = null;
+          const maxTokens = TOKEN_BUDGETS[tokenBudgetIdx];
+          try {
+            for await (const ev of provider.chat(committeeMessages, { model: currentModel, temperature: 0.3, maxTokens, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
+              if (ev.type === "text.delta") {
+                const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
+                text += chunk;
+                started = true;
+                pushDelta(currentModel, index, chunk);
+              } else if (ev.type === "reasoning.delta") {
+                // Some free models (e.g. Cohere, Nemotron) produce thousands
+                // of reasoning tokens before — or instead of — content. With
+                // a limited token budget, a reasoning-heavy model can fill
+                // the entire budget with chain-of-thought and never emit any
+                // content, leaving `text` empty. Capture reasoning as a
+                // fallback so the run doesn't failover when the model
+                // genuinely produced an analysis — just in its thinking trace.
+                const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
+                reasoning += chunk;
+                started = true;
+              } else if (ev.type === "provider.started") {
+                const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
+                if (genId) {
+                  result.generationIds ??= {};
+                  result.generationIds[reviewerKey] = genId;
+                }
+              } else if (ev.type === "provider.queued") {
+                // OpenRouter sends PROCESSING keep-alives throughout the stream,
+                // not just before the first token. Only surface the queued state
+                // before any text has arrived — afterwards it's just noise.
+                if (!started) pushQueued(currentModel, index);
+              } else if (ev.type === "finish") {
+                const data = ev.data as { generationId?: string; finishReason?: string } | undefined;
+                const genId = data?.generationId;
+                if (genId) {
+                  result.generationIds ??= {};
+                  result.generationIds[reviewerKey] = genId;
+                }
+                finishReason = data?.finishReason;
+              } else if (ev.type === "error") {
+                throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Provider error");
               }
-            } else if (ev.type === "provider.queued") {
-              // OpenRouter sends PROCESSING keep-alives throughout the stream,
-              // not just before the first token. Only surface the queued state
-              // before any text has arrived — afterwards it's just noise.
-              if (!started) pushQueued(model, index);
-            } else if (ev.type === "finish") {
-              const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
-              if (genId) {
-                result.generationIds ??= {};
-                result.generationIds[reviewerKey] = genId;
-              }
-            } else if (ev.type === "error") {
-              throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Provider error");
+            }
+          } catch (e) {
+            attemptError = e instanceof Error ? e.message : String(e);
+          }
+
+          // If the model produced no content but did produce reasoning, use
+          // the reasoning as the output — but ONLY when the model completed
+          // normally (no error AND finish: stop). Reject when:
+          //  - The stream errored (terminated/fetch failed/timeout): the
+          //    reasoning was interrupted mid-thought and is incomplete.
+          //  - finish: length: the model hit the token limit during reasoning
+          //    (the trace is almost always incomplete or degenerate).
+          //  - Degenerate: repetitive loop stuck on the same sentence.
+          // In all rejected cases, trigger retry/failover instead of accepting
+          // incomplete chain-of-thought as a reviewer output.
+          if (!text.trim() && reasoning.trim().length > 200) {
+            const degenerate = isDegenerate(reasoning);
+            const truncated = finishReason === "length";
+            if (!attemptError && !truncated && !degenerate) {
+              text = `[NOTE: Model produced only reasoning (no content) — using reasoning trace as output.]\n\n${reasoning}`;
+              pushDelta(currentModel, index, text);
+            } else if (attemptError) {
+              lastError = `Model produced only reasoning then stream errored (${attemptError}, ${reasoning.length} chars) — reasoning is incomplete`;
+            } else if (truncated) {
+              lastError = `Model hit token limit during reasoning (${reasoning.length} chars, finish: length) — reasoning is incomplete`;
+            } else {
+              lastError = `Model reasoning is degenerate/repetitive (${reasoning.length} chars) — not usable as output`;
             }
           }
-          result.rawOutputs[model] = text;
-          // Persist after every reviewer so an interruption (quit/restart)
-          // keeps the completed work — resume skips already-done reviewers.
-          await persist();
-          return { model, raw: text, index, error: null as string | null };
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          // If the model produced partial text before erroring/timing out,
-          // preserve that text so findings are not lost.
-          if (text.trim().length > 200) {
-            result.rawOutputs[model] = text + `\n\n[NOTE: Reviewer stopped early: ${msg}]`;
-            await persist();
-            return { model, raw: result.rawOutputs[model], index, error: msg };
+
+          // Usable output → done. Partial text (>200 chars) before an error
+          // is preserved with a NOTE so findings are not lost (no failover).
+          if (attemptError && text.trim().length > 200 && !isToolCallOutput(text)) {
+            successModel = currentModel;
+            successText = text + `\n\n[NOTE: Reviewer stopped early: ${attemptError}]`;
+            lastError = attemptError;
+            break;
           }
-          result.rawOutputs[model] = `[REVIEWER ERROR: ${msg}]`;
-          await persist();
-          return { model, raw: "", index, error: msg };
+          if (!attemptError && text.trim().length > 0 && !isToolCallOutput(text)) {
+            successModel = currentModel;
+            successText = text;
+            lastError = null;
+            break;
+          }
+          // If the output was tool-call-like, set a specific error message.
+          if (isToolCallOutput(text)) {
+            lastError = `Model produced tool-call syntax instead of review content (${text.length} chars) — did not follow the review prompt`;
+          }
+
+          // No usable output this attempt — decide the retry strategy.
+          lastError = lastError ?? attemptError ?? "No output — model returned empty response";
+          const truncated = finishReason === "length";
+          const modelSpecific = isToolCallOutput(text) || (reasoning.trim().length > 200 && isDegenerate(reasoning));
+
+          // Strategy 1: Truncation → raise token budget, retry same model.
+          if (truncated && tokenBudgetIdx < TOKEN_BUDGETS.length - 1) {
+            tokenBudgetIdx++;
+            const newBudget = TOKEN_BUDGETS[tokenBudgetIdx];
+            result.retries ??= [];
+            result.retries.push({ model: currentModel, reviewerIndex: index, reason: lastError, maxTokens: newBudget });
+            pushRetry(currentModel, index, lastError, newBudget);
+            continue;
+          }
+
+          // Strategy 2: Transient failure (not model-specific) → retry same
+          // model once with the same params.
+          if (!modelSpecific && sameModelRetries < MAX_SAME_MODEL_RETRIES) {
+            sameModelRetries++;
+            result.retries ??= [];
+            result.retries.push({ model: currentModel, reviewerIndex: index, reason: lastError, maxTokens: TOKEN_BUDGETS[tokenBudgetIdx] });
+            pushRetry(currentModel, index, lastError, TOKEN_BUDGETS[tokenBudgetIdx]);
+            continue;
+          }
+
+          // Strategy 3 & 4: Swap to a spare model (model-specific failure or
+          // same-model retries exhausted).
+          if (spareFailovers >= MAX_REVIEWER_FAILOVER) break;
+          const spare = takeSpare();
+          if (!spare) break;
+          spareFailovers++;
+          sameModelRetries = 0; // reset for the new model
+          // Keep tokenBudgetIdx — if the prompt needs more tokens, the spare
+          // needs them too. A concise spare may finish within the current
+          // budget; a verbose one will have room.
+          result.failovers ??= [];
+          result.failovers.push({ from: currentModel, to: spare, reviewerIndex: index, reason: lastError });
+          pushFailover(currentModel, spare, index, lastError);
+          currentModel = spare;
         }
+
+        // Persist the slot's outcome, keyed by the model that produced it.
+        if (successModel) {
+          result.rawOutputs[successModel] = successText;
+        } else {
+          result.rawOutputs[currentModel] = `[REVIEWER ERROR: ${lastError ?? "Unknown error"}]`;
+        }
+        await persist();
+        return {
+          model: successModel ?? currentModel,
+          raw: successText,
+          index,
+          error: successModel ? (lastError ?? null) : (lastError ?? "Unknown error"),
+        };
       });
 
     const allSettledPromise = Promise.allSettled(reviewerPromises);
@@ -533,13 +742,21 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
 
     // Yield deltas and queue events as they arrive until all reviewers settle.
     while (!reviewersDone) {
-      if (deltaQueue.length === 0 && queuedQueue.length === 0) {
+      if (deltaQueue.length === 0 && queuedQueue.length === 0 && failoverQueue.length === 0 && retryQueue.length === 0) {
         await new Promise<void>((r) => { deltaNotify = r; });
         deltaNotify = null;
       }
       while (queuedQueue.length > 0) {
         const q = queuedQueue.shift()!;
         yield { phase: "committee.queued", model: q.model, reviewerIndex: q.reviewerIndex, reviewerCount: reviewerIds.length };
+      }
+      while (retryQueue.length > 0) {
+        const r = retryQueue.shift()!;
+        yield { phase: "committee.retry", model: r.model, reviewerIndex: r.reviewerIndex, reviewerCount: reviewerIds.length, reason: r.reason, maxTokens: r.maxTokens };
+      }
+      while (failoverQueue.length > 0) {
+        const f = failoverQueue.shift()!;
+        yield { phase: "committee.failover", from: f.from, to: f.to, reviewerIndex: f.reviewerIndex, reviewerCount: reviewerIds.length, reason: f.reason };
       }
       while (deltaQueue.length > 0) {
         const d = deltaQueue.shift()!;
@@ -551,12 +768,30 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
       const q = queuedQueue.shift()!;
       yield { phase: "committee.queued", model: q.model, reviewerIndex: q.reviewerIndex, reviewerCount: reviewerIds.length };
     }
+    while (retryQueue.length > 0) {
+      const r = retryQueue.shift()!;
+      yield { phase: "committee.retry", model: r.model, reviewerIndex: r.reviewerIndex, reviewerCount: reviewerIds.length, reason: r.reason, maxTokens: r.maxTokens };
+    }
+    while (failoverQueue.length > 0) {
+      const f = failoverQueue.shift()!;
+      yield { phase: "committee.failover", from: f.from, to: f.to, reviewerIndex: f.reviewerIndex, reviewerCount: reviewerIds.length, reason: f.reason };
+    }
     while (deltaQueue.length > 0) {
       const d = deltaQueue.shift()!;
       yield { phase: "committee.delta", model: d.model, reviewerIndex: d.reviewerIndex, text: d.text };
     }
 
     const settled = await allSettledPromise;
+    // Reflect the actual model that served each slot — failover may have
+    // swapped a failed primary for a spare. reviewerModels is indexed by
+    // the original slot order so the UI/aggregator can attribute findings.
+    const actualModels = [...reviewerIds];
+    for (const s of settled) {
+      if (s.status === "fulfilled") {
+        actualModels[s.value.index] = s.value.model;
+      }
+    }
+    result.reviewerModels = actualModels;
     for (const s of settled) {
       if (s.status === "fulfilled") {
         // Flag reviewers that completed but produced no text — this usually
@@ -586,51 +821,141 @@ export async function* runReview(opts: ReviewRunOptions): AsyncIterable<ReviewPr
       }
     }
 
-    // 5. Aggregator → strict JSON (streamed).
+    // 5. Aggregator → strict JSON (streamed). Uses the same retry strategy
+    //    as the reviewers: same-model retry first (with raised token budget
+    //    for truncation), then spare-model failover as last resort.
     yield { phase: "aggregator", message: "Aggregating findings…", model: aggregatorModel };
     const aggPrompt = buildAggregatorPrompt(config, successfulOutputs, fallbackTasks, aggregatorModel);
     const aggMessages: ProviderMessage[] = [
       { role: "system", content: "You are an adversarial adjudicator for a committee code review. You verify findings against evidence, reject unsupported claims, and resolve disagreements from the code rather than by reviewer vote. You return ONLY a JSON object, no prose, no markdown fences." },
       { role: "user", content: aggPrompt },
     ];
+
     let aggRaw = "";
     let aggReasoning = "";
-    let aggStarted = false;
-    const aggKey = `aggregator:${aggregatorModel}`;
-    for await (const ev of provider.chat(aggMessages, { model: aggregatorModel, temperature: 0.3, maxTokens: 8192, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
-      if (ev.type === "text.delta") {
-        const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
-        aggRaw += chunk;
-        aggStarted = true;
-        yield { phase: "aggregator.delta", text: chunk };
-      } else if (ev.type === "reasoning.delta") {
-        const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
-        aggReasoning += chunk;
-        aggStarted = true;
-        yield { phase: "aggregator.reasoning", text: chunk };
-      } else if (ev.type === "provider.started") {
-        const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
-        if (genId) {
-          result.generationIds ??= {};
-          result.generationIds[aggKey] = genId;
+    let actualAggModel = aggregatorModel;
+    let aggFinishReason: string | undefined;
+    let aggError: string | null = null;
+    let aggSuccess = false;
+    const MAX_AGGREGATOR_FAILOVER = 2;
+    let aggTokenBudgetIdx = 0;
+    let aggSameModelRetries = 0;
+    let aggSpareFailovers = 0;
+
+    while (true) {
+      aggRaw = "";
+      aggReasoning = "";
+      aggFinishReason = undefined;
+      aggError = null;
+      let aggStarted = false;
+      const aggKey = `aggregator:${actualAggModel}`;
+      const aggMaxTokens = TOKEN_BUDGETS[aggTokenBudgetIdx];
+      try {
+        for await (const ev of provider.chat(aggMessages, { model: actualAggModel, temperature: 0.3, maxTokens: aggMaxTokens, signal: opts.signal, deadlineMs: opts.config.timeoutMs || DEFAULT_REVIEW_TIMEOUT_MS, sessionId })) {
+          if (ev.type === "text.delta") {
+            const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
+            aggRaw += chunk;
+            aggStarted = true;
+            yield { phase: "aggregator.delta", text: chunk };
+          } else if (ev.type === "reasoning.delta") {
+            const chunk = (ev.data as { text?: string } | undefined)?.text ?? "";
+            aggReasoning += chunk;
+            aggStarted = true;
+            yield { phase: "aggregator.reasoning", text: chunk };
+          } else if (ev.type === "provider.started") {
+            const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
+            if (genId) {
+              result.generationIds ??= {};
+              result.generationIds[aggKey] = genId;
+            }
+          } else if (ev.type === "provider.queued") {
+            // Suppress keep-alive queue events after output has started —
+            // OpenRouter intersperses them between reasoning/text chunks.
+            if (!aggStarted) yield { phase: "aggregator.queued", model: actualAggModel };
+          } else if (ev.type === "finish") {
+            const data = ev.data as { generationId?: string; finishReason?: string } | undefined;
+            const genId = data?.generationId;
+            if (genId) {
+              result.generationIds ??= {};
+              result.generationIds[aggKey] = genId;
+            }
+            aggFinishReason = data?.finishReason;
+          } else if (ev.type === "error") {
+            throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Aggregator error");
+          }
         }
-      } else if (ev.type === "provider.queued") {
-        // Suppress keep-alive queue events after output has started —
-        // OpenRouter intersperses them between reasoning/text chunks.
-        if (!aggStarted) yield { phase: "aggregator.queued", model: aggregatorModel };
-      } else if (ev.type === "finish") {
-        const genId = (ev.data as { generationId?: string } | undefined)?.generationId;
-        if (genId) {
-          result.generationIds ??= {};
-          result.generationIds[aggKey] = genId;
-        }
-      } else if (ev.type === "error") {
-        throw new Error((ev.data as { message?: string } | undefined)?.message ?? "Aggregator error");
+      } catch (e) {
+        aggError = e instanceof Error ? e.message : String(e);
       }
+
+      // Try to parse JSON from the content. If the judge returned valid
+      // JSON (even with an empty tasks array), we're done — {"tasks": []}
+      // is a correct response when there are no findings to aggregate.
+      // Only retry/failover when no JSON could be parsed at all.
+      const parsed = parseAggregatorJSON(aggRaw);
+      if (parsed.parsed) {
+        aggSuccess = true;
+        result.aggregatorOutput = aggRaw;
+        if (aggReasoning) result.aggregatorReasoning = aggReasoning;
+        break;
+      }
+
+      // No JSON content. Determine why and decide the retry strategy.
+      const truncated = aggFinishReason === "length";
+      const degenerate = aggReasoning.trim().length > 200 && isDegenerate(aggReasoning);
+      if (aggError) {
+        aggError = `Aggregator stream errored${aggReasoning ? ` after ${aggReasoning.length} chars of reasoning` : ""}: ${aggError}`;
+      } else if (truncated && !aggRaw.trim()) {
+        aggError = `Aggregator hit token limit during reasoning (${aggReasoning.length} chars, finish: length) — no JSON emitted`;
+      } else if (degenerate) {
+        aggError = `Aggregator reasoning is degenerate/repetitive (${aggReasoning.length} chars) — no JSON emitted`;
+      } else if (!aggRaw.trim()) {
+        aggError = "Aggregator returned empty output — no JSON emitted";
+      } else {
+        aggError = `Aggregator output did not parse as JSON (${aggRaw.length} chars)`;
+      }
+
+      // Strategy 1: Truncation → raise token budget, retry same model.
+      if (truncated && aggTokenBudgetIdx < TOKEN_BUDGETS.length - 1) {
+        aggTokenBudgetIdx++;
+        const newBudget = TOKEN_BUDGETS[aggTokenBudgetIdx];
+        result.aggregatorRetries ??= [];
+        result.aggregatorRetries.push({ model: actualAggModel, reason: aggError, maxTokens: newBudget });
+        yield { phase: "aggregator.retry", model: actualAggModel, reason: aggError, maxTokens: newBudget };
+        continue;
+      }
+
+      // Strategy 2: Transient failure (not degenerate) → retry same model.
+      if (!degenerate && aggSameModelRetries < MAX_SAME_MODEL_RETRIES) {
+        aggSameModelRetries++;
+        result.aggregatorRetries ??= [];
+        result.aggregatorRetries.push({ model: actualAggModel, reason: aggError, maxTokens: TOKEN_BUDGETS[aggTokenBudgetIdx] });
+        yield { phase: "aggregator.retry", model: actualAggModel, reason: aggError, maxTokens: TOKEN_BUDGETS[aggTokenBudgetIdx] };
+        continue;
+      }
+
+      // Strategy 3: Swap to a spare model.
+      if (aggSpareFailovers >= MAX_AGGREGATOR_FAILOVER) break;
+      const spare = takeAggSpare();
+      if (!spare) break;
+      aggSpareFailovers++;
+      aggSameModelRetries = 0;
+      result.aggregatorFailovers ??= [];
+      result.aggregatorFailovers.push({ from: actualAggModel, to: spare, reason: aggError });
+      yield { phase: "aggregator.failover", from: actualAggModel, to: spare, reason: aggError };
+      actualAggModel = spare;
     }
 
-    result.aggregatorOutput = aggRaw;
-    if (aggReasoning) result.aggregatorReasoning = aggReasoning;
+    // Reflect the actual model that served the aggregator.
+    result.aggregatorModel = actualAggModel;
+
+    // If we never got parseable JSON, keep whatever content we have for the
+    // table-parse fallback. Also keep reasoning for the raw output.
+    if (!aggSuccess) {
+      result.aggregatorOutput = aggRaw;
+      if (aggReasoning) result.aggregatorReasoning = aggReasoning;
+    }
+
     const parsed = parseAggregatorJSON(aggRaw);
     let tasks = parsed.tasks;
 

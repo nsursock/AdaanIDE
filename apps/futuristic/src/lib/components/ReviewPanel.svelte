@@ -916,6 +916,27 @@
           c.model === ev.model && c.status === "queued" ? { ...c, status: "running" } : c,
         );
         break;
+      case "committee.retry": {
+        // Same-model retry (possibly with a raised token budget). Update
+        // the card status and log — no card swap since the model is the same.
+        runLog = `Retrying ${modelLabel(ev.model)} (${ev.maxTokens} tokens): ${ev.reason}`;
+        break;
+      }
+      case "committee.failover": {
+        // A reviewer errored or returned empty output — mark the failed
+        // model's card and add a fresh card for the spare so its streaming
+        // deltas have somewhere to land.
+        reviewerCards = reviewerCards.map((c) =>
+          c.model === ev.from && c.index === ev.reviewerIndex
+            ? { ...c, status: "error", error: `failed → ${modelLabel(ev.to)}` }
+            : c,
+        );
+        if (!reviewerCards.some((c) => c.model === ev.to && c.index === ev.reviewerIndex)) {
+          reviewerCards = [...reviewerCards, { model: ev.to, index: ev.reviewerIndex, status: "running" }];
+        }
+        runLog = `${modelLabel(ev.from)} failed (${ev.reason}) → retrying with ${modelLabel(ev.to)}`;
+        break;
+      }
       case "committee.done":
         reviewerCards = reviewerCards.map((c) =>
           c.model === ev.model ? { ...c, status: ev.error ? "error" : "done", error: ev.error ?? undefined } : c,
@@ -962,6 +983,26 @@
         );
         runLog = `Aggregator thinking…`;
         break;
+      case "aggregator.retry": {
+        // Same-model retry for the judge (possibly with a raised token budget).
+        aggregatorStarted = false;
+        aggregatorReasoning = "";
+        runLog = `Retrying judge ${modelLabel(ev.model)} (${ev.maxTokens} tokens): ${ev.reason}`;
+        break;
+      }
+      case "aggregator.failover": {
+        // The judge model errored or produced only truncated/degenerate
+        // reasoning — mark its card as errored and add a fresh card for
+        // the replacement model so its streaming has somewhere to land.
+        aggregatorStarted = false;
+        aggregatorReasoning = "";
+        reviewerCards = reviewerCards.map((c) =>
+          c.isAggregator && c.model === ev.from ? { ...c, status: "error", error: ev.reason } : c,
+        );
+        reviewerCards = [...reviewerCards, { model: ev.to, index: reviewerCards.length, status: "running", isAggregator: true }];
+        runLog = `Aggregator ${modelLabel(ev.from)} → ${modelLabel(ev.to)}: ${ev.reason}`;
+        break;
+      }
       case "github": runLog = `GitHub: ${ev.message}`; break;
       case "complete": runLog = "Complete."; break;
       case "cancelled": runLog = "Cancelled."; break;

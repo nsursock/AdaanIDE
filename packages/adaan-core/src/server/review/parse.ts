@@ -80,16 +80,22 @@ export function parsePriorityTable(markdown: string): ReviewTask[] {
 
 export interface AggregatorOutput {
   tasks: ReviewTask[];
+  /** true if valid JSON was found and parsed (even if tasks is empty).
+   *  false if no JSON object could be extracted from the text. Callers
+   *  use this to distinguish "judge returned {tasks: []}" (a valid result
+   *  when there are no findings) from "judge produced no JSON at all"
+   *  (a failure that should trigger failover). */
+  parsed: boolean;
 }
 
 /** Parse the aggregator's JSON response: { tasks: [...] } */
 export function parseAggregatorJSON(text: string): AggregatorOutput {
   const json = extractFirstJSON(text);
-  if (!json) return { tasks: [] };
+  if (!json) return { tasks: [], parsed: false };
   const tasks: ReviewTask[] = Array.isArray(json.tasks)
     ? json.tasks.map(normalizeTask).filter(Boolean) as ReviewTask[]
     : [];
-  return { tasks };
+  return { tasks, parsed: true };
 }
 
 function extractFirstJSON(text: string): Record<string, unknown> | null {

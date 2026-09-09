@@ -75,10 +75,11 @@ test("parseAggregatorJSON: parses raw JSON without fences", () => {
   const text = '{"tasks":[]}';
   const out = parseAggregatorJSON(text);
   assert.equal(out.tasks.length, 0);
+  assert.equal(out.parsed, true, "parsed=true for valid JSON with empty tasks");
 });
 
-test("parseAggregatorJSON: returns empty on garbage", () => {
-  assert.deepEqual(parseAggregatorJSON("no json here"), { tasks: [] });
+test("parseAggregatorJSON: returns empty (parsed=false) on garbage", () => {
+  assert.deepEqual(parseAggregatorJSON("no json here"), { tasks: [], parsed: false });
 });
 
 test("parseAggregatorJSON: drops tasks without an issue field", () => {

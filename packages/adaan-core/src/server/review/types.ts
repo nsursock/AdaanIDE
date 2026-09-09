@@ -177,6 +177,26 @@ export interface ReviewResult {
    *  understanding failover (e.g. requested gemma → got cohere via 429
    *  failover) and auto-router decisions (e.g. openrouter/auto → GPT-5.6). */
   generationMetadata?: Record<string, GenerationMetadata>;
+  /** Reviewer same-model retries that occurred during this run — each entry
+   *  records a slot where the model errored, returned empty, or truncated,
+   *  and was retried on the SAME model (possibly with a raised token budget
+   *  for truncation) before any spare-model failover. Distinct from
+   *  `failovers` which records swaps to a different model. */
+  retries?: { model: string; reviewerIndex: number; reason: string; maxTokens: number }[];
+  /** Reviewer failovers that occurred during this run — each entry records
+   *  a slot that errored or produced empty output and was retried on a spare
+   *  model from the same tier pool. Useful for explaining why a run's
+   *  `reviewerModels` differ from the config's selected models. */
+  failovers?: { from: string; to: string; reviewerIndex: number; reason: string }[];
+  /** Aggregator same-model retries — the judge was retried on the SAME model
+   *  (possibly with a raised token budget) before any spare-model failover. */
+  aggregatorRetries?: { model: string; reason: string; maxTokens: number }[];
+  /** Aggregator failovers that occurred during this run — the judge model
+   *  errored, produced only truncated/degenerate reasoning, or returned no
+   *  parseable JSON, and was retried on a spare model from the same tier
+   *  pool. Useful for explaining why `aggregatorModel` differs from the
+   *  config's selected model. */
+  aggregatorFailovers?: { from: string; to: string; reason: string }[];
 }
 
 /** Metadata for a single OpenRouter generation, fetched from
@@ -228,12 +248,16 @@ export type ReviewProgress =
   | { phase: "committee.start"; model: string; reviewerIndex: number; reviewerCount: number }
   | { phase: "committee.queued"; model: string; reviewerIndex: number; reviewerCount: number }
   | { phase: "committee.delta"; model: string; reviewerIndex: number; text: string }
+  | { phase: "committee.retry"; model: string; reviewerIndex: number; reviewerCount: number; reason: string; maxTokens: number }
+  | { phase: "committee.failover"; from: string; to: string; reviewerIndex: number; reviewerCount: number; reason: string }
   | { phase: "committee.done"; model: string; reviewerIndex: number; error?: string }
   | { phase: "cancelled"; message: string }
   | { phase: "aggregator"; message: string; model: string }
   | { phase: "aggregator.queued"; model: string }
   | { phase: "aggregator.delta"; text: string }
   | { phase: "aggregator.reasoning"; text: string }
+  | { phase: "aggregator.retry"; model: string; reason: string; maxTokens: number }
+  | { phase: "aggregator.failover"; from: string; to: string; reason: string }
   | { phase: "parse"; message: string }
   | { phase: "github"; message: string; taskIndex: number }
   | { phase: "complete"; result: ReviewResult }
